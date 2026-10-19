@@ -2344,9 +2344,53 @@ svg.leaflet-image-layer.leaflet-interactive path {
     for (var r = 0; r < rows; r++) for (var c = 0; c < cols; c++) out.push([w + c * dx, s + r * dy, w + (c + 1) * dx, s + (r + 1) * dy]);
     return out;
   }
-  function nvdbCellUrl(b) {
-    return NVDB_URL + '?kartutsnitt=' + b.map(function (v) { return v.toFixed(5); }).join(',') +
-      '&srid=4326&inkluder=egenskaper,geometri&antall=1000&sortering=false&inkluderAntall=false';
+  // Flere varianter av samme spørring. Appen prøver dem i rekkefølge hvis serveren svarer 400 (ugyldig forespørsel),
+  // og husker den første som virker.
+  function nvdbVariants(b) {
+    var bb = '?kartutsnitt=' + b.map(function (v) { return v.toFixed(5); }).join(',');
+    return [
+      NVDB_URL + bb + '&srid=4326&inkluder=egenskaper,geometri&antall=500',
+      NVDB_URL + bb + '&srid=4326&inkluder=egenskaper,geometri&antall=100',
+      NVDB_URL + bb + '&srid=4326&inkluder=egenskaper&inkluder=geometri&antall=100',
+      NVDB_URL + bb + '&srid=wgs84&inkluder=egenskaper,geometri&antall=100',
+      NVDB_URL + bb + '&srid=4326&inkluder=alle&antall=100'
+    ];
+  }
+  function serverMessage(txt) {
+    if (!txt) return '';
+    try {
+      var j = JSON.parse(txt);
+      var m = j.message || j.melding || j.detail || j.title || j.error || (Array.isArray(j) && j[0] && (j[0].message || j[0].melding));
+      if (m) return String(m).slice(0, 300);
+    } catch (e) { /* ikke JSON */ }
+    return String(txt).replace(/\s+/g, ' ').slice(0, 300);
+  }
+  function getJson(url) {
+    return fetch(url).then(function (r) {
+      if (r.ok) return r.json();
+      return r.text().then(function (txt) {
+        var msg = serverMessage(txt);
+        if (window.console) console.log('NVDB-feil', r.status, url, txt);
+        var e = new Error('http ' + r.status + (msg ? ': ' + msg : ''));
+        e.status = r.status;
+        throw e;
+      });
+    });
+  }
+  function firstPage(b) {
+    var vs = nvdbVariants(b), first = nvdb.variant || 0, order = [first], i;
+    for (i = 0; i < vs.length; i++) if (i !== first) order.push(i);
+    function attempt(k, lastErr) {
+      if (k >= order.length) return Promise.reject(lastErr);
+      return getJson(vs[order[k]]).then(function (j) {
+        nvdb.variant = order[k];
+        return j;
+      }, function (e) {
+        if (e.status === 400) return attempt(k + 1, e); // prøv neste variant
+        throw e;
+      });
+    }
+    return attempt(0, null);
   }
 
   function setNvUI(running) {
@@ -2370,28 +2414,24 @@ svg.leaflet-image-layer.leaflet-interactive path {
       $('nvBar').value = Math.round(doneCells / cells.length * 100);
       $('nvStatus').textContent = 'Henter fra Vegvesenet: rute ' + doneCells + ' av ' + cells.length + ', ' + fmtInt(st.got) + ' objekter så langt.';
     }
-    function page(url) {
-      if (nvdb.cancel || failed) return Promise.resolve();
-      return fetch(url)
-        .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
-        .then(function (j) {
-          var objs = (j && j.objekter) || [];
-          objs.forEach(function (o) {
-            if (!o || seen[o.id]) return;
-            seen[o.id] = true; st.got++;
-            if (!sample) sample = o;
-            var c = parseNvdbObject(o, st);
-            if (c) found[o.id] = c;
-          });
-          var next = j && j.metadata && j.metadata.neste && j.metadata.neste.href;
-          progress();
-          if (objs.length && next) return page(next);
-        });
+    function handle(j) {
+      if (nvdb.cancel || failed) return;
+      var objs = (j && j.objekter) || [];
+      objs.forEach(function (o) {
+        if (!o || seen[o.id]) return;
+        seen[o.id] = true; st.got++;
+        if (!sample) sample = o;
+        var c = parseNvdbObject(o, st);
+        if (c) found[o.id] = c;
+      });
+      var next = j && j.metadata && j.metadata.neste && j.metadata.neste.href;
+      progress();
+      if (objs.length && next) return getJson(next).then(handle);
     }
     function worker() {
       if (nvdb.cancel || failed || qi >= cells.length) return Promise.resolve();
       var b = cells[qi++];
-      return page(nvdbCellUrl(b)).catch(function (e) { failed = e; }).then(function () { doneCells++; progress(); return worker(); });
+      return firstPage(b).then(handle).catch(function (e) { failed = e; }).then(function () { doneCells++; progress(); return worker(); });
     }
     var ws = [];
     for (var i = 0; i < 3; i++) ws.push(worker());
@@ -2400,7 +2440,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
       if (nvdb.cancel) { nvdbSummary(); toast('Henting avbrutt. Tidligere lagrede data er beholdt.'); return; }
       if (failed) {
         nvdbSummary();
-        toast('Fikk ikke hentet data fra Vegvesenet (' + (failed.message || 'ukjent feil') + '). Sjekk nettet, eller prøv igjen senere.');
+        var why = failed.message || 'ukjent feil';
+        $('nvStatus').textContent += ' Siste feil fra Vegvesenet: ' + why;
+        toast('Fikk ikke hentet data fra Vegvesenet (' + why + ').');
         return;
       }
       var list = Object.keys(found).map(function (k) { return found[k]; });
