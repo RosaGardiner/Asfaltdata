@@ -806,7 +806,15 @@ svg.leaflet-image-layer.leaflet-interactive path {
   .range-row input[type=range] { width: 100%; accent-color: var(--ink); }
   #ageLabel { font-weight: 600; color: var(--ink); }
 
-  #list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+  .listhead {
+    justify-content: space-between;
+    font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif;
+    font-size: 19px;
+    padding: 8px 12px;
+  }
+  .listhead[aria-expanded="true"] #listCaret { transform: rotate(180deg); }
+  #listCaret { display: inline-block; font-size: 14px; }
+  #list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 2px; }
   .item {
     width: 100%;
     display: grid;
@@ -852,19 +860,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   .leaflet-tile-pane { filter: saturate(0.45) brightness(1.05) contrast(0.96); }
   .map-full .leaflet-tile-pane { filter: none; }
   .leaflet-container.drawing { cursor: crosshair; }
-  .leaflet-container.drawing .seg-badge { pointer-events: none; }
   .leaflet-container { font-family: inherit; }
-
-  .seg-badge {
-    width: 22px; height: 22px;
-    display: grid; place-items: center;
-    border: 2px solid #fff;
-    border-radius: 6px;
-    box-shadow: 0 1px 4px rgba(0,0,0,.45);
-    font: 700 15px/1 'Barlow Condensed', 'Arial Narrow', sans-serif;
-  }
-  .seg-badge.roadwork { background: #f4c430; color: #1f2a30; }
-  .seg-badge.noasphalt { background: #6b4f3a; color: #fff; }
 
   .loc-btn {
     width: 34px; height: 34px;
@@ -1068,8 +1064,10 @@ svg.leaflet-image-layer.leaflet-interactive path {
     </section>
 
     <section>
-      <h2 id="listTitle">Strekninger</h2>
-      <ul id="list"></ul>
+      <button id="listToggle" class="btn block listhead" aria-expanded="false" aria-controls="list">
+        <span id="listTitle">Strekninger</span><span id="listCaret" aria-hidden="true">▾</span>
+      </button>
+      <ul id="list" hidden></ul>
       <p id="empty" hidden>Ingen strekninger ennå. Trykk «Marker strekning» og følg en vei på kartet.</p>
     </section>
 
@@ -1177,7 +1175,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   var MARK_ALPHA = 0.5;  // gjennomsiktighet for asfaltmarkeringer (1 = dekkende)
   var DASH_ALPHA = 0.75; // for stiplede linjer (veiarbeid, grus)
 
-  var TYPE_LABEL = { asphalt: 'Asfalt', roadwork: 'Veiarbeid', noasphalt: 'Mangler asfalt', nocycle: 'Sykling forbudt' };
+  var TYPE_LABEL = { asphalt: 'Asfalt', roadwork: 'Veiarbeid', noasphalt: 'Mangler asfalt', nocycle: 'Sykling forbudt', hidden: 'Skjult strekning' };
   var BAN_COLOR = '#4b5563';
   var TYPE_COLOR = { roadwork: '#7048e8', noasphalt: '#6b4f3a', nocycle: BAN_COLOR };
   var UNKNOWN_COLOR = '#7a8590';
@@ -1465,6 +1463,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     };
   }
   function passes(s, f) {
+    if (s.type === 'hidden') return false;   // tegnes ikke, men skjuler Vegvesenets data
     if (s.type === 'nocycle') return !!f.nocycle;
     if (!f[s.type]) return false;
     if (s.type === 'asphalt' && f.maxAge < AGE_ALL) {
@@ -1569,20 +1568,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
     segLayer.addLayer(line);
     segLayer.addLayer(hit);
 
-    if (s.type !== 'asphalt') {
-      var mid = s.coords[Math.floor(s.coords.length / 2)];
-      var icon = L.divIcon({
-        className: 'seg-badge ' + s.type,
-        html: s.type === 'roadwork' ? '!' : '×',
-        iconSize: [22, 22]
-      });
-      var mk = L.marker(mid, { icon: icon, keyboard: false, title: TYPE_LABEL[s.type] });
-      mk.on('click', function () {
-        if (state.mode !== 'view') return;
-        openPopupFor(s, mid);
-      });
-      segLayer.addLayer(mk);
-    }
   }
 
   function renderList(visible) {
@@ -1617,7 +1602,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
       ? 'Strekninger (' + segments.length + ')'
       : 'Strekninger (' + visible.length + ' av ' + segments.length + ')';
     $('listTitle').textContent = title;
-    $('empty').hidden = segments.length > 0;
+    $('empty').hidden = $('list').hidden || segments.length > 0;
   }
 
   // Asfaltalder vises ikke der sykling er forbudt. Her bygges et rutenett over alle
@@ -1716,10 +1701,11 @@ svg.leaflet-image-layer.leaflet-interactive path {
     segLayer.clearLayers();
     var f = filters();
     var visible = segments.filter(function (s) { return passes(s, f); });
+    var hiddenMarks = segments.filter(function (s) { return s.type === 'hidden'; });
     // Eldre markeringer tegnes først, så den nyeste ligger øverst der de overlapper.
     visible.sort(function (a, b) { return String(a.created).localeCompare(String(b.created)); });
     visible.forEach(addSegLayer);
-    renderList(visible);
+    renderList(visible.concat(hiddenMarks));
     var sig = segments.length + ':' + segments.map(function (s) { return s.id; }).join(',').length;
     if (sig !== render.lastSig) { render.lastSig = sig; markHidden(); }
     if (nvdb.layer) nvdb.layer.redraw();
@@ -1871,9 +1857,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
       o.value = String(y); o.textContent = String(y);
       yearSel.appendChild(o);
     }
-    var u = document.createElement('option');
-    u.value = 'unknown'; u.textContent = 'Vet ikke';
-    yearSel.appendChild(u);
   })();
 
   function currentType() {
@@ -1959,6 +1942,34 @@ svg.leaflet-image-layer.leaflet-interactive path {
     });
   }
 
+  // Lagrer en markering som overstyrer Vegvesenets data på samme strekning.
+  function saveOverride(data) {
+    var seg = {
+      id: uid(), type: data.type, year: data.year, note: data.note || '', until: data.until || '',
+      by: data.by || '', coords: data.coords.map(function (c) { return [round5(c[0]), round5(c[1])]; }),
+      created: new Date().toISOString()
+    };
+    if (sharedOn()) {
+      seg.id = newId(); seg.remote = true; seg.pending = true;
+      tokens[seg.id] = newToken(); saveTokens();
+    }
+    segments.push(seg);
+    save(); render();
+    replaceOlder(seg);
+    if (seg.remote) sharedPost(seg).then(sharedStatus);
+    return seg;
+  }
+  // «Endre» på en strekning fra Vegvesenet: åpner skjemaet med samme linje og årstall.
+  var pendingOverride = null;
+  function overrideFrom(coords, type, year, note) {
+    pendingOverride = { coords: coords, type: type, year: year, note: note };
+    openForm(null);
+    var r = document.querySelector('input[name="type"][value="' + type + '"]');
+    if (r) { r.checked = true; syncFormRows(); }
+    if (year != null) yearSel.value = String(year);
+    $('sharedHint').hidden = !sharedOn();
+  }
+
   function saveForm() {
     var type = currentType();
     var year = null;
@@ -1991,6 +2002,15 @@ svg.leaflet-image-layer.leaflet-interactive path {
       return;
     }
 
+    if (pendingOverride) {
+      var po = pendingOverride;
+      pendingOverride = null;
+      closeForm();
+      state.mode = 'view';
+      saveOverride({ coords: po.coords, type: type, year: year, note: note, until: until, by: by });
+      toast('Endringen er lagret og erstatter Vegvesenets data her.');
+      return;
+    }
     var coords = segCoords().map(function (c) { return [round5(c[0]), round5(c[1])]; });
     if (coords.length < 2) { $('formErr').textContent = 'Strekningen mangler punkter. Gå tilbake og sett flere.'; return; }
     var seg = {
@@ -2025,6 +2045,12 @@ svg.leaflet-image-layer.leaflet-interactive path {
   }
 
   function cancelForm() {
+    if (pendingOverride) {
+      pendingOverride = null;
+      closeForm();
+      state.mode = 'view';
+      return;
+    }
     var wasEditing = !!state.editingId;
     closeForm();
     state.editingId = null;
@@ -2153,7 +2179,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     });
     return {
       id: c.id, type: c.t === 'g' ? 'noasphalt' : 'asphalt', year: c.y, date: c.d,
-      mass: c.m, lag: c.l, thick: c.k, full: parts, parts: parts, bb: [minX, minY, maxX, maxY]
+      mass: c.m, lag: c.l, thick: c.k, raw: c, full: parts, parts: parts, bb: [minX, minY, maxX, maxY]
     };
   }
 
@@ -2313,6 +2339,16 @@ svg.leaflet-image-layer.leaflet-interactive path {
     L.popup({ maxWidth: 280 }).setLatLng(latlng).setContent(el).openOn(map);
   }
 
+  // Gjør om en strekning fra Vegvesenet til vanlige koordinater (den lengste delen av den).
+  function nvdbCoords(it) {
+    var best = null;
+    (it.raw.p || []).forEach(function (flat) { if (!best || flat.length > best.length) best = flat; });
+    if (!best) return null;
+    var out = [];
+    for (var i = 0; i < best.length; i += 2) out.push([best[i], best[i + 1]]);
+    return out.length >= 2 ? out : null;
+  }
+
   function openNvdbPopup(it, latlng) {
     var el = document.createElement('div');
     el.className = 'pop';
@@ -2331,6 +2367,42 @@ svg.leaflet-image-layer.leaflet-interactive path {
     if (it.mass) line('Massetype: ' + it.mass);
     if (it.thick != null && isFinite(it.thick)) line('Dekketykkelse: ' + it.thick + ' mm');
     line('Kilde: Statens vegvesen (NVDB)' + (nvdb.fetchedAt ? ', oppdatert ' + fmtDate(nvdb.fetchedAt) : ''), 'meta');
+
+    var coords = nvdbCoords(it);
+    if (coords) {
+      var actions = document.createElement('div');
+      actions.className = 'actions';
+
+      var edit = document.createElement('button');
+      edit.className = 'btn small';
+      edit.textContent = 'Endre';
+      edit.addEventListener('click', function () {
+        map.closePopup();
+        overrideFrom(coords, it.type, it.year, '');
+      });
+
+      var del = document.createElement('button');
+      del.className = 'btn small';
+      del.textContent = 'Slett';
+      var armed = false, timer = null;
+      del.addEventListener('click', function () {
+        if (!armed) {
+          armed = true;
+          del.textContent = 'Trykk igjen for å slette';
+          del.classList.add('danger');
+          timer = setTimeout(function () { armed = false; del.textContent = 'Slett'; del.classList.remove('danger'); }, 4000);
+          return;
+        }
+        clearTimeout(timer);
+        map.closePopup();
+        saveOverride({ coords: coords, type: 'hidden', year: null, note: '', until: '', by: lastBy() });
+        toast('Strekningen er skjult. Du finner den under Strekninger og kan angre der.');
+      });
+
+      actions.appendChild(edit);
+      actions.appendChild(del);
+      el.appendChild(actions);
+    }
     L.popup({ maxWidth: 280 }).setLatLng(latlng).setContent(el).openOn(map);
   }
 
@@ -2389,6 +2461,12 @@ svg.leaflet-image-layer.leaflet-interactive path {
   }
   function banLoad() { loadStatic(BAN_FILE, BAN_KEY, banApply, banSummary); }
   $('fBan').addEventListener('change', function () { bans.layer.redraw(); render(); });
+  $('listToggle').addEventListener('click', function () {
+    var open = $('list').hidden;
+    $('list').hidden = !open;
+    $('empty').hidden = !(open && !segments.length);
+    this.setAttribute('aria-expanded', String(open));
+  });
   var MUTED_KEY = 'asfaltkart:muted';
   function applyMuted() {
     var on = $('fMuted').checked;
@@ -2596,13 +2674,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
     li.appendChild(document.createTextNode(b.label));
     legend.appendChild(li);
   });
-  var unk = document.createElement('li');
-  var ubar = document.createElement('span');
-  ubar.className = 'bar';
-  ubar.style.background = UNKNOWN_COLOR;
-  unk.appendChild(ubar);
-  unk.appendChild(document.createTextNode('Ukjent alder'));
-  legend.appendChild(unk);
 
   if (CFG.dev) {
     $('devTag').hidden = false;
