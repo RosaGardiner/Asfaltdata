@@ -1,0 +1,53 @@
+# Publiserer siden på GitHub Pages. Kjører automatisk når du laster opp filer til main.
+# Du kan også starte den selv under Actions, og da velge å hente nye asfaltdata fra Statens vegvesen først.
+name: Publiser siden
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      oppdater_vegdata:
+        description: "Hent nye asfaltdata fra Statens vegvesen først"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publiser:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Hent asfaltdata fra Statens vegvesen
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.oppdater_vegdata }}
+        run: python3 oppdater_vegdata.py
+
+      - name: Lagre oppdatert datafil i repoet
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.oppdater_vegdata }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add vegdekke.json
+          git diff --cached --quiet || git commit -m "Oppdater vegdata"
+          git push
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
