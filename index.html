@@ -742,6 +742,12 @@ svg.leaflet-image-layer.leaflet-interactive path {
     letter-spacing: 0.01em;
   }
   .sub { margin: 6px 0 0; color: var(--muted); font-size: 14px; max-width: 28ch; }
+  .devtag {
+    display: inline-block; margin: 6px 0 0; padding: 2px 8px;
+    border: 1px solid var(--accent); border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    font-size: 12px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase;
+  }
   .centerline {
     margin: 14px 18px 0;
     border-top: 3px dashed var(--accent);
@@ -1002,6 +1008,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     <div>
       <h1>Asfaltkart</h1>
       <p class="sub">Se hvor asfalten er fersk, og hvor det er veiarbeid eller mangler dekke. Oslo og Akershus.</p>
+      <span class="devtag" id="devTag" hidden>Forhåndsvisning</span>
     </div>
     <button id="togglePanel" class="btn small" aria-expanded="true" aria-controls="panelScroll">Skjul panel</button>
   </div>
@@ -1054,24 +1061,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
       <h2 id="listTitle">Strekninger</h2>
       <ul id="list"></ul>
       <p id="empty" hidden>Ingen strekninger ennå. Trykk «Marker strekning» og følg en vei på kartet.</p>
-    </section>
-
-    <section>
-      <h2>Offline-kart</h2>
-      <p class="note first">«Kartverket topo» kan lastes ned for Oslo og Akershus, så det virker uten nett. Bytt kart med lagvelgeren øverst til høyre på kartet.</p>
-      <p class="note" id="dlLayerNote" hidden>OpenStreetMap-kartet kan ikke lastes ned, for kartserveren deres forbyr lagring for offline bruk. Bytt til «Kartverket topo» for å laste ned.</p>
-      <div class="field-inline">
-        <label for="dlLevel">Detaljnivå</label>
-        <select id="dlLevel"></select>
-      </div>
-      <div class="data-row">
-        <button id="dlStart" class="btn small">Last ned</button>
-        <button id="dlCancel" class="btn small" hidden>Avbryt</button>
-        <button id="dlClear" class="btn small">Slett lagret kart</button>
-      </div>
-      <progress id="dlBar" max="100" value="0" hidden></progress>
-      <p class="note" id="dlStatus" aria-live="polite"></p>
-      <p class="note">For Kartverket-kartet lagres fliser du ser mens du har nett automatisk. Uten nett strekkes lagrede fliser ut når du zoomer lenger inn.</p>
     </section>
 
     <section>
@@ -1134,6 +1123,11 @@ svg.leaflet-image-layer.leaflet-interactive path {
     </div>
 
     <div class="field">
+      <label for="byIn">Meldt inn av (valgfritt)</label>
+      <input type="text" id="byIn" maxlength="60" placeholder="Navn, klubb eller kallenavn. La stå tomt for anonymt.">
+    </div>
+
+    <div class="field">
       <label for="noteIn">Kommentar (valgfritt)</label>
       <textarea id="noteIn" maxlength="300" placeholder="Hvordan er dekket? Er det grus, hull eller omkjøring?"></textarea>
     </div>
@@ -1156,6 +1150,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
   // Delte markeringer settes opp i konfig.js (ved siden av denne filen). Tomt = bare lagring på enheten.
   var CFG = window.ASFALTKART_KONFIG || {};
   var SHARED_URL = String(CFG.supabaseUrl || '').replace(/\/+$/, '');
+  // Hvor datafilene fra Vegvesenet ligger, i forhold til siden. Forhåndsvisningen i dev/ setter denne til '../'.
+  var DATA_BASE = String(CFG.dataBase || '');
   var SHARED_KEY = String(CFG.supabaseKey || '');
   var YEAR = new Date().getFullYear();
   var STORE_KEY = 'asfaltkart:v1';
@@ -1169,7 +1165,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
   var KEEP_YEARS = 10;   // Vegvesen-data eldre enn dette importeres aldri og vises aldri
   var MARK_ALPHA = 0.5;  // gjennomsiktighet for asfaltmarkeringer (1 = dekkende)
   var DASH_ALPHA = 0.75; // for stiplede linjer (veiarbeid, grus)
-  var AVG_TILE_KB = 14; // grovt anslag, brukes bare til å vise omtrentlig størrelse
 
   var TYPE_LABEL = { asphalt: 'Asfalt', roadwork: 'Veiarbeid', noasphalt: 'Mangler asfalt' };
   var TYPE_COLOR = { roadwork: '#7048e8', noasphalt: '#6b4f3a' };
@@ -1208,10 +1203,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
     return d / 1000;
   }
   function fmtKm(km) { return km.toLocaleString('nb-NO', { maximumFractionDigits: 1 }) + ' km'; }
-  function fmtMB(bytes) {
-    var mb = bytes / 1048576;
-    return mb.toLocaleString('nb-NO', { maximumFractionDigits: mb < 10 ? 1 : 0 }) + ' MB';
-  }
   function fmtInt(n) { return n.toLocaleString('nb-NO'); }
   function fmtDate(iso) {
     try { return new Date(iso).toLocaleDateString('nb-NO'); } catch (e) { return ''; }
@@ -1261,172 +1252,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
     catch (e) { memoryOnly = true; showStoreWarning(); }
   }
 
-  /* ================= Kartfliser lagret på enheten (IndexedDB) ================= */
-  var dbPromise = null;
-  function openDB() {
-    if (dbPromise) return dbPromise;
-    dbPromise = new Promise(function (resolve, reject) {
-      if (!window.indexedDB) { reject(new Error('Ingen IndexedDB')); return; }
-      var rq = indexedDB.open('asfaltkart-tiles', 1);
-      rq.onupgradeneeded = function () { rq.result.createObjectStore('tiles'); };
-      rq.onsuccess = function () { resolve(rq.result); };
-      rq.onerror = function () { reject(rq.error); };
-    });
-    return dbPromise;
-  }
-  function dbGet(key) {
-    return openDB().then(function (db) {
-      return new Promise(function (resolve) {
-        var rq = db.transaction('tiles').objectStore('tiles').get(key);
-        rq.onsuccess = function () { resolve(rq.result || null); };
-        rq.onerror = function () { resolve(null); };
-      });
-    }).catch(function () { return null; });
-  }
-  function dbHas(key) {
-    return openDB().then(function (db) {
-      return new Promise(function (resolve) {
-        var rq = db.transaction('tiles').objectStore('tiles').count(key);
-        rq.onsuccess = function () { resolve(rq.result > 0); };
-        rq.onerror = function () { resolve(false); };
-      });
-    }).catch(function () { return false; });
-  }
-  function dbPut(key, blob) {
-    return openDB().then(function (db) {
-      return new Promise(function (resolve) {
-        var tx = db.transaction('tiles', 'readwrite');
-        tx.objectStore('tiles').put(blob, key);
-        tx.oncomplete = function () { resolve(true); };
-        tx.onerror = function () { resolve(false); };
-        tx.onabort = function () { resolve(false); };
-      });
-    }).catch(function () { return false; });
-  }
-  function prefixRange(layer) { return IDBKeyRange.bound(layer + '/', layer + '/\uffff'); }
-  function dbStats(layer) {
-    return openDB().then(function (db) {
-      return new Promise(function (resolve) {
-        var n = 0, b = 0;
-        var rq = db.transaction('tiles').objectStore('tiles').openCursor(prefixRange(layer));
-        rq.onsuccess = function () {
-          var c = rq.result;
-          if (c) { n++; b += (c.value && c.value.size) || 0; c['continue'](); }
-          else resolve({ n: n, b: b });
-        };
-        rq.onerror = function () { resolve({ n: 0, b: 0 }); };
-      });
-    }).catch(function () { return { n: 0, b: 0 }; });
-  }
-  function dbClear(layer) {
-    return openDB().then(function (db) {
-      return new Promise(function (resolve) {
-        var tx = db.transaction('tiles', 'readwrite');
-        tx.objectStore('tiles')['delete'](prefixRange(layer));
-        tx.oncomplete = function () { resolve(true); };
-        tx.onerror = function () { resolve(false); };
-      });
-    }).catch(function () { return false; });
-  }
-
-  var KV_URL = 'https://cache.kartverket.no/v1/wmts/1.0.0/{layer}/default/webmercator/{z}/{y}/{x}.png';
-  function tileUrl(layer, z, x, y) {
-    return KV_URL.replace('{layer}', layer).replace('{z}', z).replace('{x}', x).replace('{y}', y);
-  }
-  function tileKey(layer, z, x, y) { return layer + '/' + z + '/' + x + '/' + y; }
-
-  // Telling av fliser innenfor området
-  function lon2x(lon, z) { return Math.floor((lon + 180) / 360 * Math.pow(2, z)); }
-  function lat2y(lat, z) {
-    var r = lat * Math.PI / 180;
-    return Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * Math.pow(2, z));
-  }
-  function tileRange(z) {
-    return {
-      x0: lon2x(AREA.getWest(), z), x1: lon2x(AREA.getEast(), z),
-      y0: lat2y(AREA.getNorth(), z), y1: lat2y(AREA.getSouth(), z)
-    };
-  }
-  function tileCount(zMax) {
-    var n = 0;
-    for (var z = MIN_ZOOM; z <= zMax; z++) {
-      var r = tileRange(z);
-      n += (r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1);
-    }
-    return n;
-  }
-  function tileList(zMax) {
-    var out = [];
-    for (var z = MIN_ZOOM; z <= zMax; z++) {
-      var r = tileRange(z);
-      for (var x = r.x0; x <= r.x1; x++) for (var y = r.y0; y <= r.y1; y++) out.push({ z: z, x: x, y: y });
-    }
-    return out;
-  }
-
-  // Kartlag som leser fra enheten først, deretter fra nett (og lagrer), og til slutt strekker et lagret
-  // overordnet flis hvis nettet mangler.
-  var cacheFails = 0; // etter flere feil i strekk slutter vi å prøve å lagre og viser bare flisene
-  var CachedTile = L.TileLayer.extend({
-    initialize: function (layer, options) {
-      this.kvLayer = layer;
-      L.TileLayer.prototype.initialize.call(this, '', options);
-    },
-    createTile: function (coords, done) {
-      var layer = this.kvLayer, z = coords.z, x = coords.x, y = coords.y;
-      var img = document.createElement('img');
-      img.alt = '';
-      var finished = false;
-      function finish(err) { if (!finished) { finished = true; done(err || null, img); } }
-
-      function showBlob(blob) {
-        var u = URL.createObjectURL(blob);
-        img.onload = function () { URL.revokeObjectURL(u); finish(); };
-        img.onerror = function () { URL.revokeObjectURL(u); finish(new Error('flis')); };
-        img.src = u;
-      }
-      function fromParent(dz) {
-        if (dz > 3 || z - dz < 0) { finish(new Error('ingen flis')); return; }
-        var n = Math.pow(2, dz), pz = z - dz, px = Math.floor(x / n), py = Math.floor(y / n);
-        dbGet(tileKey(layer, pz, px, py)).then(function (pb) {
-          if (!pb) { fromParent(dz + 1); return; }
-          var tmp = new Image(), u = URL.createObjectURL(pb);
-          tmp.onload = function () {
-            URL.revokeObjectURL(u);
-            var size = 256 / n;
-            var c = document.createElement('canvas');
-            c.width = c.height = 256;
-            var ctx = c.getContext('2d');
-            ctx.imageSmoothingEnabled = true;
-            ctx.drawImage(tmp, (x - px * n) * size, (y - py * n) * size, size, size, 0, 0, 256, 256);
-            c.toBlob(function (b) { if (b) showBlob(b); else finish(new Error('lerret')); });
-          };
-          tmp.onerror = function () { URL.revokeObjectURL(u); fromParent(dz + 1); };
-          tmp.src = u;
-        });
-      }
-      function viaImage() {
-        img.onload = function () { finish(); };
-        img.onerror = function () { fromParent(1); };
-        img.src = tileUrl(layer, z, x, y);
-      }
-      function viaFetch() {
-        fetch(tileUrl(layer, z, x, y))
-          .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.blob(); })
-          .then(function (b) { cacheFails = 0; dbPut(tileKey(layer, z, x, y), b); showBlob(b); })
-          .catch(function () { cacheFails++; viaImage(); });
-      }
-
-      dbGet(tileKey(layer, z, x, y)).then(function (blob) {
-        if (blob) { showBlob(blob); return; }
-        if (!navigator.onLine) { fromParent(1); return; }
-        if (cacheFails >= 3) { viaImage(); return; }
-        viaFetch();
-      });
-      return img;
-    }
-  });
-
   /* ================= Kart ================= */
   var map = L.map('map', {
     zoomControl: true,
@@ -1443,20 +1268,32 @@ svg.leaflet-image-layer.leaflet-interactive path {
   var osmLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM, bounds: AREA_PAD, attribution: osmAttr
   });
-  // Kartverkets fargekart kan lastes ned for offline bruk.
-  var kvTopo = new CachedTile('topo', { minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM, maxNativeZoom: 18, bounds: AREA_PAD, attribution: kvAttr });
+  var kvTopo = L.tileLayer('https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png', {
+    minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM, maxNativeZoom: 18, bounds: AREA_PAD, attribution: kvAttr
+  });
+  var bases = { 'OpenStreetMap': osmLayer, 'Kartverket topo': kvTopo };
+
+  // Flyfoto settes opp i konfig.js, fordi alle flyfototjenester krever egen nøkkel.
+  //   aerial: { url: '...{z}/{x}/{y}...', attribution: '...', maxZoom: 19 }
+  // Mapbox:        https://api.mapbox.com/v4/mapbox.satellite/{z}/{x}/{y}@2x.jpg90?access_token=DIN_TOKEN
+  // Norge i bilder: krever token fra Kartverket/Geonorge.
+  var aerial = CFG.aerial && CFG.aerial.url ? L.tileLayer(String(CFG.aerial.url), {
+    minZoom: MIN_ZOOM,
+    maxZoom: MAX_ZOOM,
+    maxNativeZoom: Number(CFG.aerial.maxZoom) || 18,
+    bounds: AREA_PAD,
+    attribution: String(CFG.aerial.attribution || 'Flyfoto')
+  }) : null;
+  if (aerial) bases[String(CFG.aerial.label || 'Flyfoto')] = aerial;
+
   var BASE_KEY = 'asfaltkart:base';
-  var LAYER_OSM = { id: 'osm', label: 'OpenStreetMap', offline: false };
-  var LAYER_KV = { id: 'topo', label: 'Kartverket topo', offline: true };
   var baseSaved = null;
   try { baseSaved = localStorage.getItem(BASE_KEY); } catch (e) { /* ignorer */ }
-  var currentLayer = baseSaved === 'topo' ? LAYER_KV : LAYER_OSM;
-  (currentLayer === LAYER_KV ? kvTopo : osmLayer).addTo(map);
-  L.control.layers({ 'OpenStreetMap': osmLayer, 'Kartverket topo (kan lastes ned)': kvTopo }, null, { position: 'topright' }).addTo(map);
+  var startLayer = bases[baseSaved] || osmLayer;
+  startLayer.addTo(map);
+  L.control.layers(bases, null, { position: 'topright' }).addTo(map);
   map.on('baselayerchange', function (e) {
-    currentLayer = e.layer === kvTopo ? LAYER_KV : LAYER_OSM;
-    try { localStorage.setItem(BASE_KEY, currentLayer.id); } catch (er) { /* ignorer */ }
-    syncOfflineUI();
+    try { localStorage.setItem(BASE_KEY, e.name); } catch (er) { /* ignorer */ }
   });
 
   var segLayer = L.layerGroup().addTo(map);
@@ -1627,6 +1464,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     if (s.type === 'asphalt' && s.year != null) line(ageText(s.year));
     if (s.type === 'roadwork' && s.until) line('Forventet ferdig: ' + s.until);
     if (s.note) line(s.note);
+    line('Meldt inn av: ' + (s.by ? s.by : 'anonym'), 'meta');
     line(fmtKm(lengthKm(s.coords)) + ', lagt inn ' + fmtDate(s.created) + (s.remote ? ', delt med alle' : ''), 'meta');
     if (!canEdit(s)) return el;
 
@@ -1723,7 +1561,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
       t.textContent = titleOf(s);
       var m = document.createElement('span');
       m.className = 'm';
-      m.textContent = fmtKm(lengthKm(s.coords)) + (s.note ? ', ' + s.note : '');
+      m.textContent = fmtKm(lengthKm(s.coords)) + (s.note ? ', ' + s.note : (s.by ? ', ' + s.by : ''));
       wrap.appendChild(t); wrap.appendChild(m);
       b.appendChild(sw); b.appendChild(wrap);
       b.addEventListener('click', function () {
@@ -1914,6 +1752,14 @@ svg.leaflet-image-layer.leaflet-interactive path {
     r.addEventListener('change', syncFormRows);
   });
 
+  // Husker navnet som sist ble brukt, så det slipper å skrives på nytt.
+  var BY_KEY = 'asfaltkart:by';
+  function lastBy() {
+    try { return localStorage.getItem(BY_KEY) || ''; } catch (e) { return ''; }
+  }
+  function rememberBy(v) {
+    try { if (v) localStorage.setItem(BY_KEY, v); else localStorage.removeItem(BY_KEY); } catch (e) { /* ignorer */ }
+  }
   var lastFocus = null;
   function openForm(existing) {
     state.editingId = existing ? existing.id : null;
@@ -1925,6 +1771,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     document.querySelector('input[name="type"][value="' + type + '"]').checked = true;
     yearSel.value = existing ? (existing.year == null ? (existing.type === 'asphalt' ? 'unknown' : '') : String(existing.year)) : '';
     $('untilIn').value = existing && existing.until ? existing.until : '';
+    $('byIn').value = existing && existing.by ? existing.by : lastBy();
     $('noteIn').value = existing && existing.note ? existing.note : '';
     $('formErr').textContent = '';
     $('sharedHint').hidden = !(sharedOn() && (!existing || existing.remote));
@@ -1947,7 +1794,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
       year = v === 'unknown' ? null : Number(v);
     }
     var note = $('noteIn').value.trim().slice(0, 300);
+    var by = $('byIn').value.trim().slice(0, 60);
     var until = type === 'roadwork' ? $('untilIn').value.trim().slice(0, 60) : '';
+    rememberBy(by);
 
     if (state.editingId) {
       var s = segments.filter(function (x) { return x.id === state.editingId; })[0];
@@ -1956,12 +1805,12 @@ svg.leaflet-image-layer.leaflet-interactive path {
       state.editingId = null;
       if (!s) return;
       var apply = function () {
-        s.type = type; s.year = year; s.note = note; s.until = until;
+        s.type = type; s.year = year; s.note = note; s.until = until; s.by = by;
         save(); render();
         toast('Endringene er lagret.');
       };
       if (s.remote && !s.pending) {
-        sharedUpdate(s, type, year, note, until).then(function (ok) {
+        sharedUpdate(s, type, year, note, until, by).then(function (ok) {
           if (ok) apply(); else toast('Fikk ikke lagret endringen i delt kart. Prøv igjen med nett.');
         });
       } else apply();
@@ -1971,7 +1820,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     var coords = segCoords().map(function (c) { return [round5(c[0]), round5(c[1])]; });
     if (coords.length < 2) { $('formErr').textContent = 'Strekningen mangler punkter. Gå tilbake og sett flere.'; return; }
     var seg = {
-      id: uid(), type: type, year: year, note: note, until: until,
+      id: uid(), type: type, year: year, note: note, until: until, by: by,
       coords: coords, created: new Date().toISOString()
     };
     if (sharedOn()) {
@@ -2012,7 +1861,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
       features: segments.map(function (s) {
         return {
           type: 'Feature',
-          properties: { id: s.id, type: s.type, year: s.year, note: s.note || '', until: s.until || '', created: s.created },
+          properties: { id: s.id, type: s.type, year: s.year, note: s.note || '', until: s.until || '', by: s.by || '', created: s.created },
           geometry: { type: 'LineString', coordinates: s.coords.map(function (c) { return [c[1], c[0]]; }) }
         };
       })
@@ -2047,7 +1896,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
       if (yr != null && (!isFinite(yr) || yr < 1900 || yr > YEAR)) yr = null;
       segments.push({
         id: id, type: p.type, year: p.type === 'asphalt' ? yr : null,
-        note: String(p.note || '').slice(0, 300), until: String(p.until || '').slice(0, 60),
+        note: String(p.note || '').slice(0, 300), until: String(p.until || '').slice(0, 60), by: String(p.by || '').slice(0, 60),
         coords: coords, created: typeof p.created === 'string' ? p.created : new Date().toISOString()
       });
       have[id] = true; added++;
@@ -2056,117 +1905,13 @@ svg.leaflet-image-layer.leaflet-interactive path {
     toast(added ? added + ' strekninger importert.' : 'Ingen nye strekninger i filen.');
   }
 
-  /* ================= Offline-kart: nedlasting ================= */
-  var dl = { running: false, cancel: false };
-
-  function fillLevels() {
-    var sel = $('dlLevel');
-    [[12, 'Oversikt, til zoom 12'], [14, 'Standard, til zoom 14']].forEach(function (o) {
-      var n = tileCount(o[0]);
-      var opt = document.createElement('option');
-      opt.value = String(o[0]);
-      opt.textContent = o[1] + ' (' + fmtInt(n) + ' fliser, ca. ' + fmtMB(n * AVG_TILE_KB * 1024) + ')';
-      sel.appendChild(opt);
-    });
-    sel.value = '14';
-  }
-
-  function syncOfflineUI() {
-    var ok = currentLayer.offline;
-    $('dlStart').disabled = !ok || dl.running;
-    $('dlLevel').disabled = !ok || dl.running;
-    $('dlClear').disabled = !ok;
-    $('dlLayerNote').hidden = ok;
-    if (ok) refreshStored(); else $('dlStatus').textContent = '';
-  }
-
-  function refreshStored() {
-    if (!currentLayer.offline) { $('dlStatus').textContent = ''; return; }
-    dbStats(currentLayer.id).then(function (s) {
-      if (dl.running) return;
-      $('dlStatus').textContent = s.n
-        ? 'Lagret på enheten for dette kartet: ' + fmtInt(s.n) + ' fliser (' + fmtMB(s.b) + ').'
-        : 'Ingenting lagret for dette kartet ennå.';
-    });
-  }
-
-  function setDlUI(running) {
-    dl.running = running;
-    $('dlStart').hidden = running;
-    $('dlClear').hidden = running;
-    $('dlCancel').hidden = !running;
-    $('dlLevel').disabled = running;
-    $('dlBar').hidden = !running;
-    if (!running) syncOfflineUI();
-  }
-
-  function startDownload() {
-    if (dl.running || !currentLayer.offline) return;
-    var layer = currentLayer.id;
-    var zMax = +$('dlLevel').value;
-    var list = tileList(zMax);
-    var next = 0, done = 0, fail = 0, bytes = 0, streak = 0, reason = '';
-    dl.cancel = false;
-    setDlUI(true);
-    $('dlBar').value = 0;
-    $('dlStatus').textContent = 'Starter nedlasting …';
-    try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
-
-    function update() {
-      var pct = Math.round((done + fail) / list.length * 100);
-      $('dlBar').value = pct;
-      $('dlStatus').textContent = 'Laster ned: ' + fmtInt(done) + ' av ' + fmtInt(list.length) + ' fliser (' + pct + ' %), ' + fmtMB(bytes) + ' hentet.';
-    }
-    function worker() {
-      if (dl.cancel || next >= list.length) return Promise.resolve();
-      var t = list[next++];
-      var key = tileKey(layer, t.z, t.x, t.y);
-      return dbHas(key).then(function (has) {
-        if (has) { done++; return; }
-        return fetch(tileUrl(layer, t.z, t.x, t.y))
-          .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.blob(); })
-          .then(function (b) {
-            bytes += b.size;
-            return dbPut(key, b).then(function (ok) {
-              if (!ok) { var e = new Error('lagring'); e.storage = true; throw e; }
-              done++; streak = 0;
-            });
-          });
-      }).catch(function (e) {
-        fail++; streak++;
-        if (e && e.storage) { reason = 'Det er ikke nok lagringsplass på enheten.'; dl.cancel = true; }
-        else if (streak >= 8) {
-          reason = navigator.onLine
-            ? 'Kartserveren tillot ikke lagring fra denne adressen. Prøv å åpne siden via https eller localhost.'
-            : 'Nettet falt ut.';
-          dl.cancel = true;
-        }
-      }).then(function () { update(); return worker(); });
-    }
-    var workers = [];
-    for (var i = 0; i < 6; i++) workers.push(worker());
-    Promise.all(workers).then(function () {
-      setDlUI(false);
-      if (dl.cancel) {
-        refreshStored();
-        setTimeout(function () {
-          toast(reason ? 'Nedlastingen stoppet. ' + reason : 'Nedlastingen er avbrutt. Det som er lastet ned, er lagret.');
-        }, 0);
-      } else {
-        refreshStored();
-        toast(fail ? 'Ferdig, men ' + fmtInt(fail) + ' fliser feilet. Kjør nedlastingen på nytt for å fylle hullene.' : 'Kartet er lastet ned og virker nå uten nett.');
-      }
-    });
-  }
-
-
   /* ================= Data fra Statens vegvesen (NVDB) ================= */
   // Datafilen vegdekke.json lages av eieren av siden (oppdater_vegdata.py) og ligger ved siden av siden.
-  var NVDB_FILE = 'vegdekke.json';
+  var NVDB_FILE = DATA_BASE + 'vegdekke.json';
   var NVDB_KEY = 'nvdb-vegdekke';
   var nvdb = { items: [], fetchedAt: null, stats: null, layer: null };
   // Veier der sykling er forbudt (motorveg og skiltet forbud). Filen lages av oppdater_vegdata.py.
-  var BAN_FILE = 'ikke-sykkel.json';
+  var BAN_FILE = DATA_BASE + 'ikke-sykkel.json';
   var BAN_KEY = 'nvdb-ikke-sykkel';
   var BAN_COLOR = '#4b5563';
   var bans = { items: [], fetchedAt: null, stats: null, layer: null };
@@ -2502,7 +2247,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   function rowToSeg(r) {
     return {
       id: String(r.id), type: r.type, year: r.year == null ? null : Number(r.year),
-      note: r.note || '', until: r.until_text || '', coords: r.coords, created: r.created_at, remote: true
+      note: r.note || '', until: r.until_text || '', by: r.reported_by || '', coords: r.coords, created: r.created_at, remote: true
     };
   }
   function mergeRemote(rows) {
@@ -2515,7 +2260,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   function sharedFetchAll() {
     var out = [], page = 1000;
     function next(off) {
-      return sbFetch('/rest/v1/marks?select=id,created_at,type,year,note,until_text,coords&order=created_at.asc&limit=' + page + '&offset=' + off)
+      return sbFetch('/rest/v1/marks?select=id,created_at,type,year,note,until_text,reported_by,coords&order=created_at.asc&limit=' + page + '&offset=' + off)
         .then(function (r) { return r.json(); })
         .then(function (rows) {
           out = out.concat(rows);
@@ -2546,7 +2291,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     });
   }
   function sharedPost(s) {
-    var body = { id: s.id, type: s.type, year: s.year, note: s.note || '', until_text: s.until || '', coords: s.coords, token: tokens[s.id] };
+    var body = { id: s.id, type: s.type, year: s.year, note: s.note || '', until_text: s.until || '', reported_by: s.by || '', coords: s.coords, token: tokens[s.id] };
     return sbFetch('/rest/v1/marks', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(body) })
       .then(function () { s.pending = false; save(); return true; })
       .catch(function (e) {
@@ -2566,10 +2311,10 @@ svg.leaflet-image-layer.leaflet-interactive path {
     return todo.reduce(function (p, s) { return p.then(function () { return sharedPost(s); }); }, Promise.resolve())
       .then(function () { sharedStatus(); });
   }
-  function sharedUpdate(s, type, year, note, until) {
+  function sharedUpdate(s, type, year, note, until, by) {
     return sbFetch('/rest/v1/rpc/update_mark', {
       method: 'POST',
-      body: JSON.stringify({ p_id: s.id, p_token: tokens[s.id], p_type: type, p_year: year, p_note: note, p_until: until })
+      body: JSON.stringify({ p_id: s.id, p_token: tokens[s.id], p_type: type, p_year: year, p_note: note, p_until: until, p_by: by })
     }).then(function (r) { return r.json(); }).then(function (ok) { return ok === true; }).catch(function () { return false; });
   }
   function sharedDelete(s) {
@@ -2613,13 +2358,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
     e.target.value = '';
   });
 
-  $('dlStart').addEventListener('click', startDownload);
-  $('dlCancel').addEventListener('click', function () { dl.cancel = true; });
-  $('dlClear').addEventListener('click', function () {
-    if (!currentLayer.offline) return;
-    dbClear(currentLayer.id).then(function () { refreshStored(); toast('Lagret kart er slettet for ' + currentLayer.label + '.'); });
-  });
-
   window.addEventListener('online', function () {
     toast('Du er tilbake på nett.');
     syncPending().then(sharedRefresh);
@@ -2627,7 +2365,14 @@ svg.leaflet-image-layer.leaflet-interactive path {
   document.addEventListener('visibilitychange', function () {
     if (!document.hidden && sharedOn() && Date.now() - shared.when > 5 * 60 * 1000) sharedRefresh();
   });
-  window.addEventListener('offline', function () { toast('Du er uten nett. Lagrede kartfliser brukes.'); });
+  window.addEventListener('offline', function () { toast('Du er uten nett. Kartet virker ikke før du er tilkoblet igjen.'); });
+
+  // På liten skjerm starter panelet skjult, så kartet fyller skjermen.
+  if (window.matchMedia && window.matchMedia('(max-width: 760px)').matches) {
+    $('panel').classList.add('collapsed');
+    $('togglePanel').textContent = 'Vis panel';
+    $('togglePanel').setAttribute('aria-expanded', 'false');
+  }
 
   $('togglePanel').addEventListener('click', function () {
     var p = $('panel');
@@ -2663,10 +2408,13 @@ svg.leaflet-image-layer.leaflet-interactive path {
   unk.appendChild(document.createTextNode('Ukjent alder'));
   legend.appendChild(unk);
 
+  if (CFG.dev) {
+    $('devTag').hidden = false;
+    document.title = 'Forhåndsvisning – ' + document.title;
+  }
   loadTokens();
   load();
   updateAgeLabel();
-  fillLevels();
 
   var h = parseHash();
   if (h) {
@@ -2679,8 +2427,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
     map.setView([59.95, 10.9], 10);
   }
   render();
-  syncOfflineUI();
-  dbClear('topograatone'); // rydder bort gammelt gråtonekart fra tidligere versjoner
+  // Rydder bort kartfliser som tidligere versjoner lagret på enheten.
+  try { if (window.indexedDB && indexedDB.deleteDatabase) indexedDB.deleteDatabase('asfaltkart-tiles'); } catch (e) { /* ignorer */ }
   nvdbLoad();
   banLoad();
   sharedBootstrap();
