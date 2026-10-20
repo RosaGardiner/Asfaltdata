@@ -842,7 +842,12 @@ svg.leaflet-image-layer.leaflet-interactive path {
 
   /* ---------- Map ---------- */
   #stage { position: relative; flex: 1; min-width: 0; height: 100%; }
-  #map { position: absolute; inset: 0; background: #e6e6e1; }
+  #map {
+    position: absolute; inset: 0;
+    background-color: #e7e5df;
+    background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='150' height='110'%3E%3Cg fill='none' stroke='%23c0392b' stroke-width='2' opacity='0.4'%3E%3Cpath d='M18 26h14M25 19v14'/%3E%3C/g%3E%3Ctext x='78' y='78' font-family='Barlow,sans-serif' font-size='15' fill='%23000' opacity='0.18' text-anchor='middle'%3EIngen kart%3C/text%3E%3C/svg%3E");
+  }
+  @media (prefers-color-scheme: dark) { #map { background-color: #1b2227; } }
   /* Demper fargene i bakgrunnskartet, så de fargede strekningene står tydeligere fram. */
   .leaflet-tile-pane { filter: saturate(0.45) brightness(1.05) contrast(0.96); }
   .map-full .leaflet-tile-pane { filter: none; }
@@ -1260,25 +1265,47 @@ svg.leaflet-image-layer.leaflet-interactive path {
   }
 
   /* ================= Kart ================= */
+  // Ingen hard grense: kartet kan dras utenfor området, men da finnes det ikke kartfliser å vise.
   var map = L.map('map', {
     zoomControl: true,
     minZoom: MIN_ZOOM,
-    maxZoom: MAX_ZOOM,
-    maxBounds: AREA_PAD,
-    maxBoundsViscosity: 1
+    maxZoom: MAX_ZOOM
   });
   var kvAttr = '&copy; <a href="https://www.kartverket.no/">Kartverket</a>';
   var osmAttr = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap-bidragsytere</a>, ' +
     '<a href="https://www.openstreetmap.org/fixthemap">rett opp kartfeil</a>';
   // OpenStreetMaps standardkart følger deres regler: https, synlig kreditering og nettleserens Referer.
   // Reglene forbyr å hente fliser på forhånd og å lagre dem for offline bruk, så dette er et helt vanlig kartlag.
-  var osmLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM, bounds: AREA_PAD, attribution: osmAttr
-  });
-  var kvTopo = L.tileLayer('https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png', {
-    minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM, maxNativeZoom: 18, bounds: AREA_PAD, attribution: kvAttr
-  });
+  var KV_FROM = 12; // Kartverket vises fra dette zoomnivået; lenger ut vises OpenStreetMap
+  function osmTiles() {
+    return L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM, bounds: AREA_PAD, attribution: osmAttr
+    });
+  }
+  var osmLayer = osmTiles();
+  // Kartverkets kart tegner veiene som tynne røde streker når man zoomer langt ut. Det ligger i
+  // selve kartflisene og kan ikke fjernes, så der vises OpenStreetMap i stedet.
+  var kvTopo = L.layerGroup([
+    osmTiles(),
+    L.tileLayer('https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png', {
+      minZoom: KV_FROM, maxZoom: MAX_ZOOM, maxNativeZoom: 18, bounds: AREA_PAD, attribution: kvAttr
+    })
+  ]);
   var bases = { 'OpenStreetMap': osmLayer, 'Kartverket topo': kvTopo };
+
+  // Valgfritt overlegg, for eksempel Strava Heatmap, satt opp i konfig.js:
+  //   heatmap: { url: '...{z}/{x}/{y}...', attribution: '...', opacity: 0.6, label: 'Strava Heatmap' }
+  var overlays = {};
+  if (CFG.heatmap && CFG.heatmap.url) {
+    overlays[String(CFG.heatmap.label || 'Strava Heatmap')] = L.tileLayer(String(CFG.heatmap.url), {
+      minZoom: MIN_ZOOM,
+      maxZoom: MAX_ZOOM,
+      maxNativeZoom: Number(CFG.heatmap.maxZoom) || 15,
+      opacity: CFG.heatmap.opacity == null ? 0.6 : Number(CFG.heatmap.opacity),
+      attribution: String(CFG.heatmap.attribution || '&copy; Strava'),
+      pane: 'heat'
+    });
+  }
 
   // Flyfoto settes opp i konfig.js, fordi alle flyfototjenester krever egen nøkkel.
   //   aerial: { url: '...{z}/{x}/{y}...', attribution: '...', maxZoom: 19 }
@@ -1298,7 +1325,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   try { baseSaved = localStorage.getItem(BASE_KEY); } catch (e) { /* ignorer */ }
   var startLayer = bases[baseSaved] || osmLayer;
   startLayer.addTo(map);
-  L.control.layers(bases, null, { position: 'topright' }).addTo(map);
+  L.control.layers(bases, overlays, { position: 'topright' }).addTo(map);
   map.on('baselayerchange', function (e) {
     try { localStorage.setItem(BASE_KEY, e.name); } catch (er) { /* ignorer */ }
   });
@@ -1306,6 +1333,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
   var segLayer = L.layerGroup().addTo(map);
   var draftLayer = L.layerGroup().addTo(map);
   var draftPath = L.layerGroup().addTo(map);
+  map.createPane('heat');
+  map.getPane('heat').style.zIndex = 320;
+  map.getPane('heat').style.pointerEvents = 'none';
   map.createPane('ban');
   map.getPane('ban').style.zIndex = 340;
   map.getPane('ban').style.pointerEvents = 'none';
@@ -1605,6 +1635,20 @@ svg.leaflet-image-layer.leaflet-interactive path {
       }
     }
   }
+  function addCoordsToIndex(idx, coords) {
+    for (var i = 1; i < coords.length; i++) {
+      var a = toNorm(coords[i - 1][0], coords[i - 1][1]);
+      var b = toNorm(coords[i][0], coords[i][1]);
+      banAddSeg(idx, a[0], a[1], b[0], b[1]);
+    }
+  }
+  function indexOfCoords(coords) {
+    var idx = {};
+    addCoordsToIndex(idx, coords);
+    return idx;
+  }
+  // Rutenett over alt som skal overstyre Vegvesenets asfaltdata: forbudte veier og alle
+  // markeringer folk har lagt inn. Det folk melder inn er ferskere enn databasen.
   function buildBanIndex() {
     var idx = {};
     bans.items.forEach(function (it) {
@@ -1612,14 +1656,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
         for (var i = 2; i < p.length; i += 2) banAddSeg(idx, p[i - 2], p[i - 1], p[i], p[i + 1]);
       });
     });
-    segments.forEach(function (s) {
-      if (s.type !== 'nocycle') return;
-      for (var i = 1; i < s.coords.length; i++) {
-        var a = toNorm(s.coords[i - 1][0], s.coords[i - 1][1]);
-        var b = toNorm(s.coords[i][0], s.coords[i][1]);
-        banAddSeg(idx, a[0], a[1], b[0], b[1]);
-      }
-    });
+    segments.forEach(function (s) { addCoordsToIndex(idx, s.coords); });
     banIndex = idx;
   }
   function nearBan(x, y) {
@@ -1679,10 +1716,12 @@ svg.leaflet-image-layer.leaflet-interactive path {
     segLayer.clearLayers();
     var f = filters();
     var visible = segments.filter(function (s) { return passes(s, f); });
+    // Eldre markeringer tegnes først, så den nyeste ligger øverst der de overlapper.
+    visible.sort(function (a, b) { return String(a.created).localeCompare(String(b.created)); });
     visible.forEach(addSegLayer);
     renderList(visible);
-    var ban = segments.filter(function (s) { return s.type === 'nocycle'; }).length;
-    if (ban !== render.lastBans) { render.lastBans = ban; markHidden(); }
+    var sig = segments.length + ':' + segments.map(function (s) { return s.id; }).join(',').length;
+    if (sig !== render.lastSig) { render.lastSig = sig; markHidden(); }
     if (nvdb.layer) nvdb.layer.redraw();
   }
 
@@ -1886,6 +1925,40 @@ svg.leaflet-image-layer.leaflet-interactive path {
     if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
   }
 
+  // Sjekker hvor stor del av en markering som ligger inne i en annen.
+  function coveredBy(coords, idx) {
+    var saved = banIndex, tot = 0, hit = 0;
+    banIndex = idx;
+    for (var i = 0; i < coords.length; i++) {
+      var n = toNorm(coords[i][0], coords[i][1]);
+      tot++;
+      if (nearBan(n[0], n[1])) hit++;
+    }
+    banIndex = saved;
+    return tot ? hit / tot : 0;
+  }
+  // Når du legger inn en ny strekning, fjernes dine egne eldre markeringer som den dekker.
+  function replaceOlder(seg) {
+    var idx = indexOfCoords(seg.coords);
+    var doomed = segments.filter(function (s) {
+      return s.id !== seg.id && canEdit(s) && coveredBy(s.coords, idx) >= 0.8;
+    });
+    if (!doomed.length) return Promise.resolve(0);
+    return doomed.reduce(function (p, s) {
+      return p.then(function () {
+        if (s.remote && !s.pending) return sharedDelete(s);
+        return true;
+      }).then(function (ok) {
+        if (!ok) return;
+        segments = segments.filter(function (x) { return x.id !== s.id; });
+        delete tokens[s.id];
+      });
+    }, Promise.resolve()).then(function () {
+      saveTokens(); save(); render();
+      return doomed.length;
+    });
+  }
+
   function saveForm() {
     var type = currentType();
     var year = null;
@@ -1935,6 +2008,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
     setDrawUI(false);
     save(); render();
     map.fitBounds(L.latLngBounds(coords), { maxZoom: 15, padding: [60, 60] });
+    replaceOlder(seg).then(function (n) {
+      if (n) toast(n === 1 ? 'Erstattet én eldre markering på samme strekning.' : 'Erstattet ' + n + ' eldre markeringer på samme strekning.');
+    });
     if (seg.remote) {
       toast('Strekningen er lagret. Sender til delt kart …');
       sharedPost(seg).then(function (ok) {
