@@ -1022,6 +1022,10 @@ svg.leaflet-image-layer.leaflet-interactive path {
           <svg width="28" height="8" aria-hidden="true"><line x1="2" y1="4" x2="27" y2="4" stroke="#6b4f3a" stroke-width="4" stroke-linecap="round" stroke-dasharray="0.1 7"/></svg>
           Mangler asfalt
         </li>
+        <li>
+          <svg width="28" height="8" aria-hidden="true"><line x1="1" y1="4" x2="27" y2="4" stroke="#4b5563" stroke-width="6" opacity="0.6"/></svg>
+          Sykling forbudt (grått)
+        </li>
       </ul>
     </section>
 
@@ -1041,6 +1045,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
       <p class="note first">Når asfalten ble lagt på riks-, fylkes- og kommunale veier i Oslo og Akershus. Grusveier vises som «Mangler asfalt».</p>
       <label class="check"><input type="checkbox" id="fNvdb" checked> Vis Vegvesenets data</label>
       <p class="note" id="nvStatus" aria-live="polite"></p>
+      <label class="check"><input type="checkbox" id="fBan" checked> Grå ut veier der sykling er forbudt</label>
+      <p class="note" id="banStatus" aria-live="polite"></p>
       <p class="note">Kilde: Statens vegvesen, Nasjonal vegdatabank (NVDB), Norsk lisens for offentlige data (NLOD). Datoen er når dekket ble registrert lagt, og kan mangle eller være unøyaktig.</p>
     </section>
 
@@ -1456,6 +1462,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
   var segLayer = L.layerGroup().addTo(map);
   var draftLayer = L.layerGroup().addTo(map);
   var draftPath = L.layerGroup().addTo(map);
+  map.createPane('ban');
+  map.getPane('ban').style.zIndex = 340;
+  map.getPane('ban').style.pointerEvents = 'none';
   map.createPane('nvdb');
   map.getPane('nvdb').style.zIndex = 350;
   map.getPane('nvdb').style.pointerEvents = 'none';
@@ -1866,9 +1875,13 @@ svg.leaflet-image-layer.leaflet-interactive path {
 
   map.on('click', function (e) {
     if (state.mode === 'draw') { addPoint(e.latlng); return; }
-    if (state.mode === 'view' && nvdb.layer && $('fNvdb').checked && e.containerPoint) {
-      var hit = nvdb.layer.nearest(e.containerPoint, Math.max(10, nvdbWeight(map.getZoom()) / 2 + 6));
-      if (hit) openNvdbPopup(hit, e.latlng);
+    if (state.mode === 'view' && nvdb.layer && e.containerPoint) {
+      if (!$('fNvdb').checked && !$('fBan').checked) return;
+      var tol = Math.max(10, nvdbWeight(map.getZoom()) / 2 + 6);
+      var hit = $('fNvdb').checked ? nvdb.layer.nearest(e.containerPoint, tol) : null;
+      if (hit) { openNvdbPopup(hit, e.latlng); return; }
+      var ban = $('fBan').checked && bans.layer ? bans.layer.nearest(e.containerPoint, tol) : null;
+      if (ban) openBanPopup(ban, e.latlng);
     }
   });
 
@@ -2152,6 +2165,11 @@ svg.leaflet-image-layer.leaflet-interactive path {
   var NVDB_FILE = 'vegdekke.json';
   var NVDB_KEY = 'nvdb-vegdekke';
   var nvdb = { items: [], fetchedAt: null, stats: null, layer: null };
+  // Veier der sykling er forbudt (motorveg og skiltet forbud). Filen lages av oppdater_vegdata.py.
+  var BAN_FILE = 'ikke-sykkel.json';
+  var BAN_KEY = 'nvdb-ikke-sykkel';
+  var BAN_COLOR = '#4b5563';
+  var bans = { items: [], fetchedAt: null, stats: null, layer: null };
 
   var dataDbPromise = null;
   function openDataDB() {
@@ -2215,11 +2233,12 @@ svg.leaflet-image-layer.leaflet-interactive path {
     return cx * cx + cy * cy;
   }
 
-  // Eget lerretslag: tegner titusenvis av linjer raskt, med gjennomsiktig markørfarge.
-  var NvdbLayer = L.Layer.extend({
+  // Eget lerretslag: tegner titusenvis av linjer raskt. Brukes både for asfaltdata og for veier der sykling er forbudt.
+  var LinesLayer = L.Layer.extend({
+    initialize: function (opts) { this.opts = opts; },
     onAdd: function (map) {
       this._map = map;
-      this._canvas = L.DomUtil.create('canvas', '', map.getPane('nvdb'));
+      this._canvas = L.DomUtil.create('canvas', '', map.getPane(this.opts.pane));
       this._canvas.style.pointerEvents = 'none';
       map.on('moveend resize', this.redraw, this);
       map.on('zoomstart', this._hide, this);
@@ -2246,17 +2265,17 @@ svg.leaflet-image-layer.leaflet-interactive path {
       if (!ctx) return;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
-      if (!$('fNvdb').checked || !nvdb.items.length) return;
+      var items = this.opts.items();
+      if (!this.opts.enabled() || !items.length) return;
 
       var z = map.getZoom(), scale = 256 * Math.pow(2, z), o = map.getPixelOrigin();
       var ox = o.x + tl.x, oy = o.y + tl.y, weight = nvdbWeight(z);
       var minX = ox / scale, maxX = (ox + w) / scale, minY = oy / scale, maxY = (oy + h) / scale;
-      var f = filters();
+      var f = this.opts.filter ? this.opts.filter() : null;
       ctx.lineJoin = 'round';
-      ctx.lineWidth = weight;
-      for (var n = 0; n < nvdb.items.length; n++) {
-        var it = nvdb.items[n];
-        if (!passes(it, f)) continue;
+      for (var n = 0; n < items.length; n++) {
+        var it = items[n];
+        if (this.opts.visible && !this.opts.visible(it, f)) continue;
         var bb = it.bb;
         if (bb[2] < minX || bb[0] > maxX || bb[3] < minY || bb[1] > maxY) continue;
         ctx.beginPath();
@@ -2265,17 +2284,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
           ctx.moveTo(p[0] * scale - ox, p[1] * scale - oy);
           for (var i = 2; i < p.length; i += 2) ctx.lineTo(p[i] * scale - ox, p[i + 1] * scale - oy);
         }
-        if (it.type === 'noasphalt') {
-          ctx.globalAlpha = DASH_ALPHA; ctx.lineCap = 'round';
-          ctx.setLineDash([1, weight * 1.4]);
-          ctx.lineWidth = Math.max(3, weight - 1);
-        } else {
-          ctx.globalAlpha = MARK_ALPHA; ctx.lineCap = 'butt';
-          ctx.setLineDash([]);
-          ctx.lineWidth = weight;
-        }
-        ctx.strokeStyle = colorFor(it);
-        ctx.stroke();
+        this.opts.paint(ctx, it, weight);
       }
       ctx.globalAlpha = 1;
       ctx.setLineDash([]);
@@ -2285,10 +2294,10 @@ svg.leaflet-image-layer.leaflet-interactive path {
       var map = this._map, z = map.getZoom(), scale = 256 * Math.pow(2, z), o = map.getPixelOrigin();
       var lp = map.containerPointToLayerPoint(cp);
       var px = lp.x + o.x, py = lp.y + o.y, nx = px / scale, ny = py / scale, t = tol / scale;
-      var f = filters(), best = null, bd = tol * tol;
-      for (var n = 0; n < nvdb.items.length; n++) {
-        var it = nvdb.items[n];
-        if (!passes(it, f)) continue;
+      var items = this.opts.items(), f = this.opts.filter ? this.opts.filter() : null, best = null, bd = tol * tol;
+      for (var n = 0; n < items.length; n++) {
+        var it = items[n];
+        if (this.opts.visible && !this.opts.visible(it, f)) continue;
         var bb = it.bb;
         if (nx < bb[0] - t || nx > bb[2] + t || ny < bb[1] - t || ny > bb[3] + t) continue;
         for (var k = 0; k < it.parts.length; k++) {
@@ -2302,7 +2311,76 @@ svg.leaflet-image-layer.leaflet-interactive path {
       return best;
     }
   });
-  nvdb.layer = new NvdbLayer().addTo(map);
+  nvdb.layer = new LinesLayer({
+    pane: 'nvdb',
+    items: function () { return nvdb.items; },
+    enabled: function () { return $('fNvdb').checked; },
+    filter: filters,
+    visible: passes,
+    paint: function (ctx, it, weight) {
+      if (it.type === 'noasphalt') {
+        ctx.globalAlpha = DASH_ALPHA; ctx.lineCap = 'round';
+        ctx.setLineDash([1, weight * 1.4]);
+        ctx.lineWidth = Math.max(3, weight - 1);
+      } else {
+        ctx.globalAlpha = MARK_ALPHA; ctx.lineCap = 'butt';
+        ctx.setLineDash([]);
+        ctx.lineWidth = weight;
+      }
+      ctx.strokeStyle = colorFor(it);
+      ctx.stroke();
+    }
+  }).addTo(map);
+  // Veier der sykling er forbudt tegnes grå, under asfaltdataene.
+  bans.layer = new LinesLayer({
+    pane: 'ban',
+    items: function () { return bans.items; },
+    enabled: function () { return $('fBan').checked; },
+    paint: function (ctx, it, weight) {
+      ctx.globalAlpha = 0.6; ctx.lineCap = 'butt';
+      ctx.setLineDash([]);
+      ctx.lineWidth = weight + 1;
+      ctx.strokeStyle = BAN_COLOR;
+      ctx.stroke();
+    }
+  }).addTo(map);
+
+  function normParts(p) {
+    var minX = 1, minY = 1, maxX = 0, maxY = 0;
+    var parts = p.map(function (flat) {
+      var arr = new Float64Array(flat.length);
+      for (var i = 0; i < flat.length; i += 2) {
+        var n = toNorm(flat[i], flat[i + 1]);
+        arr[i] = n[0]; arr[i + 1] = n[1];
+        if (n[0] < minX) minX = n[0]; if (n[0] > maxX) maxX = n[0];
+        if (n[1] < minY) minY = n[1]; if (n[1] > maxY) maxY = n[1];
+      }
+      return arr;
+    });
+    return { parts: parts, bb: [minX, minY, maxX, maxY] };
+  }
+  function buildBan(c) {
+    var n = normParts(c.p);
+    return { id: c.id, kind: c.k, label: c.m || '', parts: n.parts, bb: n.bb };
+  }
+
+  function openBanPopup(it, latlng) {
+    var el = document.createElement('div');
+    el.className = 'pop';
+    var h = document.createElement('strong');
+    h.textContent = 'Sykling forbudt';
+    el.appendChild(h);
+    function line(text, cls) {
+      var p = document.createElement('p');
+      if (cls) p.className = cls;
+      p.textContent = text;
+      el.appendChild(p);
+    }
+    line(it.kind === 'm' ? 'Veitype: ' + (it.label || 'Motorveg eller motortrafikkveg') : 'Skiltet forbud: ' + (it.label || 'Forbudt for syklende'));
+    line('Sjekk alltid skiltingen på stedet.');
+    line('Kilde: Statens vegvesen (NVDB)' + (bans.fetchedAt ? ', oppdatert ' + fmtDate(bans.fetchedAt) : ''), 'meta');
+    L.popup({ maxWidth: 280 }).setLatLng(latlng).setContent(el).openOn(map);
+  }
 
   function openNvdbPopup(it, latlng) {
     var el = document.createElement('div');
@@ -2348,19 +2426,37 @@ svg.leaflet-image-layer.leaflet-interactive path {
     nvdbSummary();
   }
   // Viser lagret kopi med en gang (virker uten nett), og henter så siste versjon av datafilen.
-  function nvdbLoad() {
-    kvGet(NVDB_KEY).then(function (rec) {
-      if (rec && Array.isArray(rec.items)) nvdbApply(rec); else nvdbSummary();
-      return fetch(NVDB_FILE, { cache: 'no-cache' })
+  function loadStatic(file, key, apply, summary) {
+    kvGet(key).then(function (rec) {
+      if (rec && Array.isArray(rec.items)) apply(rec); else summary();
+      return fetch(file, { cache: 'no-cache' })
         .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
         .then(function (data) {
           if (!data || !Array.isArray(data.items)) throw new Error('ugyldig fil');
           if (rec && rec.fetched === data.fetched) return; // samme versjon som lagret
-          nvdbApply(data);
-          kvPut(NVDB_KEY, data);
+          apply(data);
+          kvPut(key, data);
         });
-    }).catch(function () { nvdbSummary(); }); // ingen fil ennå, eller uten nett: behold lagret kopi
+    }).catch(function () { summary(); }); // ingen fil ennå, eller uten nett: behold lagret kopi
   }
+  function nvdbLoad() { loadStatic(NVDB_FILE, NVDB_KEY, nvdbApply, nvdbSummary); }
+
+  function banSummary() {
+    var el = $('banStatus');
+    if (!bans.items.length) { el.textContent = 'Ingen data om veier med sykkelforbud er publisert ennå.'; return; }
+    var m = 0, f = 0;
+    bans.items.forEach(function (it) { if (it.kind === 'm') m++; else f++; });
+    el.textContent = 'Sykling forbudt: ' + fmtInt(m) + ' strekninger med motorveg og ' + fmtInt(f) + ' med skiltet forbud. Oppdatert ' + fmtDate(bans.fetchedAt) + '.';
+  }
+  function banApply(rec) {
+    bans.items = rec.items.map(buildBan);
+    bans.fetchedAt = rec.fetched;
+    bans.stats = rec.stats;
+    bans.layer.redraw();
+    banSummary();
+  }
+  function banLoad() { loadStatic(BAN_FILE, BAN_KEY, banApply, banSummary); }
+  $('fBan').addEventListener('change', function () { bans.layer.redraw(); });
   $('fNvdb').addEventListener('change', function () { nvdb.layer.redraw(); });
 
   /* ================= Delte markeringer (Supabase) ================= */
@@ -2586,6 +2682,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   syncOfflineUI();
   dbClear('topograatone'); // rydder bort gammelt gråtonekart fra tidligere versjoner
   nvdbLoad();
+  banLoad();
   sharedBootstrap();
 
   // Gjør selve appen tilgjengelig uten nett når den ligger på en nettadresse (krever sw.js ved siden av).
