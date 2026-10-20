@@ -32,9 +32,13 @@ jobs:
 
       - name: Hent asfaltdata fra Statens vegvesen
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.oppdater_vegdata }}
-        run: |
-          python3 oppdater_vegdata.py
-          python3 hent_planlagte_veier.py
+        run: python3 oppdater_vegdata.py
+
+      # Feiler denne, blir steget rødt, men asfaltdataene over lagres likevel.
+      - name: Hent planlagte strekninger
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.oppdater_vegdata }}
+        continue-on-error: true
+        run: python3 hent_planlagte_veier.py
 
       - name: Lagre oppdatert datafil i repoet
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.oppdater_vegdata }}
