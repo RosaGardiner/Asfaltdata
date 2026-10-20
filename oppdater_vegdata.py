@@ -24,6 +24,26 @@ AREA = (10.05, 59.55, 11.95, 60.55)  # vest, sør, øst, nord (samme område som
 COLS, ROWS = 4, 3                    # området deles i ruter for å holde hvert svar lite
 OUT = os.environ.get("VEGDATA_UT", "vegdekke.json")
 YEAR = datetime.date.today().year
+KEEP_YEARS = 10  # asfalt lagt for mer enn så mange år siden importeres aldri
+
+
+def _cutoff():
+    t = datetime.date.today()
+    try:
+        return t.replace(year=t.year - KEEP_YEARS)
+    except ValueError:  # 29. februar
+        return t.replace(year=t.year - KEEP_YEARS, day=28)
+
+
+CUTOFF = _cutoff()
+
+
+def too_old(date, year):
+    """Sant hvis asfalten ble lagt for mer enn KEEP_YEARS år siden."""
+    try:
+        return datetime.date.fromisoformat(str(date)[:10]) < CUTOFF
+    except ValueError:
+        return year is not None and year < YEAR - KEEP_YEARS
 NOT_ASPHALT = re.compile(r"^(betong|valsebetong|brostein|gatestein|belegningsstein|stålgitter|tre$)", re.I)
 HEADERS = {"Accept": "application/json", "X-Client": "asfaltkart (GitHub Actions)"}
 
@@ -145,6 +165,9 @@ def parse_object(o, st):
     if year is None or year < 1900 or year > YEAR:
         st["nodate"] += 1
         return None
+    if too_old(date, year):
+        st["tooold"] += 1
+        return None
     st["asphalt"] += 1
     return {"id": o["id"], "t": "a", "y": year, "d": date, "m": mass, "l": lag, "k": thick, "p": parts}
 
@@ -153,7 +176,7 @@ def main():
     w, s, e, n = AREA
     dx, dy = (e - w) / COLS, (n - s) / ROWS
     cells = [(w + c * dx, s + r * dy, w + (c + 1) * dx, s + (r + 1) * dy) for r in range(ROWS) for c in range(COLS)]
-    st = {"got": 0, "asphalt": 0, "gravel": 0, "nodate": 0, "other": 0, "nogeom": 0}
+    st = {"got": 0, "asphalt": 0, "gravel": 0, "nodate": 0, "tooold": 0, "other": 0, "nogeom": 0}
     seen, found, preferred = set(), {}, 0
     for k, b in enumerate(cells, 1):
         print("Rute %d av %d ..." % (k, len(cells)), flush=True)
@@ -173,8 +196,8 @@ def main():
                 break
             data = get_json(nxt)
     items = [found[i] for i in sorted(found)]
-    print("Hentet %(got)d objekter: %(asphalt)d asfalt, %(gravel)d grus, %(nodate)d uten dato, "
-          "%(other)d andre dekketyper, %(nogeom)d uten brukbar geometri." % st)
+    print("Hentet %(got)d objekter: %(asphalt)d asfalt, %(gravel)d grus, %(tooold)d eldre enn 10 år (hoppet over), "
+          "%(nodate)d uten dato, %(other)d andre dekketyper, %(nogeom)d uten brukbar geometri." % st)
     print("Brukte forespørselsvariant", preferred)
 
     # Sikring: ikke skriv over en god fil med en mistenkelig liten
@@ -182,7 +205,8 @@ def main():
     if os.path.exists(OUT):
         try:
             with open(OUT, encoding="utf-8") as f:
-                old = len(json.load(f).get("items", []))
+                old_items = json.load(f).get("items", [])
+            old = sum(1 for i in old_items if i.get("t") == "g" or not too_old(i.get("d"), i.get("y")))
         except (ValueError, OSError):
             old = 0
     if len(items) < 50 or (old and len(items) < old * 0.5):

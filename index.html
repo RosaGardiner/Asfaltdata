@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#1f2a30">
+<meta name="referrer" content="strict-origin-when-cross-origin">
 <title>Asfaltkart for landeveissyklister</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -787,7 +788,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
 
   .legend { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; }
   .legend li { display: flex; align-items: center; gap: 8px; font-size: 14px; }
-  .bar { width: 28px; height: 8px; border-radius: 4px; flex: none; opacity: 0.55; }
+  .bar { width: 28px; height: 8px; border-radius: 4px; flex: none; opacity: 0.65; }
   .legend-other { list-style: none; margin: 10px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); display: grid; gap: 6px; }
   .legend-other li { display: flex; align-items: center; gap: 8px; font-size: 14px; }
   .legend-other svg { flex: none; }
@@ -1031,7 +1032,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
       <label class="check"><input type="checkbox" id="fNo" checked> Mangler asfalt</label>
       <div class="range-row">
         <label for="ageRange"><span id="ageLabel">Alle aldre</span></label>
-        <input type="range" id="ageRange" min="0" max="16" step="1" value="16">
+        <input type="range" id="ageRange" min="0" max="11" step="1" value="11">
       </div>
     </section>
 
@@ -1051,7 +1052,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 
     <section>
       <h2>Offline-kart</h2>
-      <p class="note first">Lagrer kartet for Oslo og Akershus på denne enheten, så det virker uten nett.</p>
+      <p class="note first">«Kartverket topo» kan lastes ned for Oslo og Akershus, så det virker uten nett. Bytt kart med lagvelgeren øverst til høyre på kartet.</p>
+      <p class="note" id="dlLayerNote" hidden>OpenStreetMap-kartet kan ikke lastes ned, for kartserveren deres forbyr lagring for offline bruk. Bytt til «Kartverket topo» for å laste ned.</p>
       <div class="field-inline">
         <label for="dlLevel">Detaljnivå</label>
         <select id="dlLevel"></select>
@@ -1063,7 +1065,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
       </div>
       <progress id="dlBar" max="100" value="0" hidden></progress>
       <p class="note" id="dlStatus" aria-live="polite"></p>
-      <p class="note">Fliser du ser mens du har nett, lagres automatisk. Uten nett strekkes lagrede fliser ut når du zoomer lenger inn.</p>
+      <p class="note">For Kartverket-kartet lagres fliser du ser mens du har nett automatisk. Uten nett strekkes lagrede fliser ut når du zoomer lenger inn.</p>
     </section>
 
     <section>
@@ -1151,27 +1153,26 @@ svg.leaflet-image-layer.leaflet-interactive path {
   var SHARED_KEY = String(CFG.supabaseKey || '');
   var YEAR = new Date().getFullYear();
   var STORE_KEY = 'asfaltkart:v1';
-  var AGE_ALL = 16; // verdi på glideren som betyr «alle aldre»
+  var AGE_ALL = 11; // verdi på glideren som betyr «alle aldre»
 
   // Oslo og Akershus (romslig utsnitt). Kartet og nedlastingen holder seg innenfor dette.
   var AREA = L.latLngBounds([59.55, 10.05], [60.55, 11.95]);
   var AREA_PAD = AREA.pad(0.08);
   var MIN_ZOOM = 9;
-  var MAX_ZOOM = 17;
-  var MARK_ALPHA = 0.4;  // gjennomsiktighet for asfaltmarkeringer (1 = dekkende)
+  var MAX_ZOOM = 19;
+  var KEEP_YEARS = 10;   // Vegvesen-data eldre enn dette importeres aldri og vises aldri
+  var MARK_ALPHA = 0.5;  // gjennomsiktighet for asfaltmarkeringer (1 = dekkende)
   var DASH_ALPHA = 0.75; // for stiplede linjer (veiarbeid, grus)
   var AVG_TILE_KB = 14; // grovt anslag, brukes bare til å vise omtrentlig størrelse
 
   var TYPE_LABEL = { asphalt: 'Asfalt', roadwork: 'Veiarbeid', noasphalt: 'Mangler asfalt' };
   var TYPE_COLOR = { roadwork: '#7048e8', noasphalt: '#6b4f3a' };
   var UNKNOWN_COLOR = '#7a8590';
+  // Alder regnes i hele kalenderår (inneværende år minus leggeår).
   var AGE_BINS = [
-    { max: 0,        color: '#0b7a5a', label: 'I år' },
-    { max: 1,        color: '#4cb36b', label: '1 år' },
-    { max: 3,        color: '#b5cf3a', label: '2–3 år' },
-    { max: 6,        color: '#f2c230', label: '4–6 år' },
-    { max: 10,       color: '#ee8a2b', label: '7–10 år' },
-    { max: Infinity, color: '#c0392b', label: '11 år eller mer' }
+    { max: 2,        color: '#12a150', label: 'Under 3 år' },
+    { max: 8,        color: '#ffcc00', label: '3 til 8 år' },
+    { max: Infinity, color: '#e11d1d', label: 'Over 8 år' }
   ];
 
   /* ================= Hjelpere ================= */
@@ -1429,8 +1430,28 @@ svg.leaflet-image-layer.leaflet-interactive path {
     maxBoundsViscosity: 1
   });
   var kvAttr = '&copy; <a href="https://www.kartverket.no/">Kartverket</a>';
-  var currentLayer = { id: 'topo', label: 'Kartverket, topo' };
-  new CachedTile(currentLayer.id, { minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM, bounds: AREA_PAD, attribution: kvAttr }).addTo(map);
+  var osmAttr = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap-bidragsytere</a>, ' +
+    '<a href="https://www.openstreetmap.org/fixthemap">rett opp kartfeil</a>';
+  // OpenStreetMaps standardkart følger deres regler: https, synlig kreditering og nettleserens Referer.
+  // Reglene forbyr å hente fliser på forhånd og å lagre dem for offline bruk, så dette er et helt vanlig kartlag.
+  var osmLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM, bounds: AREA_PAD, attribution: osmAttr
+  });
+  // Kartverkets fargekart kan lastes ned for offline bruk.
+  var kvTopo = new CachedTile('topo', { minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM, maxNativeZoom: 18, bounds: AREA_PAD, attribution: kvAttr });
+  var BASE_KEY = 'asfaltkart:base';
+  var LAYER_OSM = { id: 'osm', label: 'OpenStreetMap', offline: false };
+  var LAYER_KV = { id: 'topo', label: 'Kartverket topo', offline: true };
+  var baseSaved = null;
+  try { baseSaved = localStorage.getItem(BASE_KEY); } catch (e) { /* ignorer */ }
+  var currentLayer = baseSaved === 'topo' ? LAYER_KV : LAYER_OSM;
+  (currentLayer === LAYER_KV ? kvTopo : osmLayer).addTo(map);
+  L.control.layers({ 'OpenStreetMap': osmLayer, 'Kartverket topo (kan lastes ned)': kvTopo }, null, { position: 'topright' }).addTo(map);
+  map.on('baselayerchange', function (e) {
+    currentLayer = e.layer === kvTopo ? LAYER_KV : LAYER_OSM;
+    try { localStorage.setItem(BASE_KEY, currentLayer.id); } catch (er) { /* ignorer */ }
+    syncOfflineUI();
+  });
 
   var segLayer = L.layerGroup().addTo(map);
   var draftLayer = L.layerGroup().addTo(map);
@@ -2037,7 +2058,17 @@ svg.leaflet-image-layer.leaflet-interactive path {
     sel.value = '14';
   }
 
+  function syncOfflineUI() {
+    var ok = currentLayer.offline;
+    $('dlStart').disabled = !ok || dl.running;
+    $('dlLevel').disabled = !ok || dl.running;
+    $('dlClear').disabled = !ok;
+    $('dlLayerNote').hidden = ok;
+    if (ok) refreshStored(); else $('dlStatus').textContent = '';
+  }
+
   function refreshStored() {
+    if (!currentLayer.offline) { $('dlStatus').textContent = ''; return; }
     dbStats(currentLayer.id).then(function (s) {
       if (dl.running) return;
       $('dlStatus').textContent = s.n
@@ -2053,10 +2084,11 @@ svg.leaflet-image-layer.leaflet-interactive path {
     $('dlCancel').hidden = !running;
     $('dlLevel').disabled = running;
     $('dlBar').hidden = !running;
+    if (!running) syncOfflineUI();
   }
 
   function startDownload() {
-    if (dl.running) return;
+    if (dl.running || !currentLayer.offline) return;
     var layer = currentLayer.id;
     var zMax = +$('dlLevel').value;
     var list = tileList(zMax);
@@ -2298,10 +2330,18 @@ svg.leaflet-image-layer.leaflet-interactive path {
     if (!nvdb.items.length) { el.textContent = 'Ingen Vegvesen-data er publisert ennå.'; return; }
     var a = 0, g = 0;
     nvdb.items.forEach(function (it) { if (it.type === 'asphalt') a++; else g++; });
-    el.textContent = 'Fra Vegvesenet: ' + fmtInt(a) + ' asfaltstrekninger og ' + fmtInt(g) + ' grusstrekninger. Oppdatert ' + fmtDate(nvdb.fetchedAt) + '.';
+    el.textContent = 'Fra Vegvesenet: ' + fmtInt(a) + ' asfaltstrekninger og ' + fmtInt(g) + ' grusstrekninger. Oppdatert ' + fmtDate(nvdb.fetchedAt) + '. Asfalt eldre enn ' + KEEP_YEARS + ' år vises ikke.';
+  }
+  // Strekninger der asfalten ble lagt for mer enn KEEP_YEARS år siden vises aldri (grus har ingen dato og beholdes).
+  function tooOld(c) {
+    if (c.t === 'g') return false;
+    var cut = new Date();
+    cut.setFullYear(cut.getFullYear() - KEEP_YEARS);
+    if (c.d) { var d = new Date(c.d); if (!isNaN(d.getTime())) return d < cut; }
+    return c.y != null && c.y < YEAR - KEEP_YEARS;
   }
   function nvdbApply(rec) {
-    nvdb.items = rec.items.map(buildItem);
+    nvdb.items = rec.items.filter(function (c) { return !tooOld(c); }).map(buildItem);
     nvdb.fetchedAt = rec.fetched;
     nvdb.stats = rec.stats;
     nvdb.layer.redraw();
@@ -2480,6 +2520,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   $('dlStart').addEventListener('click', startDownload);
   $('dlCancel').addEventListener('click', function () { dl.cancel = true; });
   $('dlClear').addEventListener('click', function () {
+    if (!currentLayer.offline) return;
     dbClear(currentLayer.id).then(function () { refreshStored(); toast('Lagret kart er slettet for ' + currentLayer.label + '.'); });
   });
 
@@ -2542,7 +2583,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
     map.setView([59.95, 10.9], 10);
   }
   render();
-  refreshStored();
+  syncOfflineUI();
+  dbClear('topograatone'); // rydder bort gammelt gråtonekart fra tidligere versjoner
   nvdbLoad();
   sharedBootstrap();
 
