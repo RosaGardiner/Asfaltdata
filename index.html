@@ -1593,7 +1593,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   // Asfaltalder vises ikke der sykling er forbudt. Her bygges et rutenett over alle
   // forbudte strekninger, både Vegvesenets og dem folk har markert selv.
   var BAN_CELL = 1e-5;          // ca. 200 m i normaliserte koordinater
-  var BAN_TOL = 6e-7;           // ca. 8 m
+  var BAN_TOL = 9e-7;           // ca. 12 m
   var banIndex = null;
   function banAddSeg(idx, ax, ay, bx, by) {
     var x0 = Math.floor(Math.min(ax, bx) / BAN_CELL), x1 = Math.floor(Math.max(ax, bx) / BAN_CELL);
@@ -1636,21 +1636,42 @@ svg.leaflet-image-layer.leaflet-interactive path {
     }
     return false;
   }
-  function onBanned(parts) {
-    var tot = 0, hit = 0;
+  // Klipper bort de delene av en strekning som ligger på en forbudt vei, og beholder resten.
+  // Et punkt regnes som forbudt når punktet selv eller begge nabopunktene ligger inntil en grå linje.
+  function clipParts(parts) {
+    var out = [], any = false;
     for (var k = 0; k < parts.length; k++) {
-      var p = parts[k];
-      for (var i = 0; i < p.length; i += 2) {
-        tot++;
-        if (nearBan(p[i], p[i + 1])) hit++;
+      var p = parts[k], n = p.length / 2, flags = new Array(n), i;
+      for (i = 0; i < n; i++) flags[i] = nearBan(p[i * 2], p[i * 2 + 1]);
+      for (i = 0; i < n; i++) if (flags[i]) any = true;
+      var run = [];
+      for (i = 0; i < n; i++) {
+        if (!flags[i]) {
+          run.push(p[i * 2], p[i * 2 + 1]);
+        } else {
+          if (run.length >= 4) out.push(Float64Array.from(run));
+          run = [];
+        }
       }
+      if (run.length >= 4) out.push(Float64Array.from(run));
     }
-    return tot > 0 && hit / tot >= 0.8;
+    return any ? out : null; // null betyr: ingenting å klippe, behold som den er
   }
-  // Merker Vegvesenets asfaltstrekninger som ligger på en forbudt vei, så de ikke tegnes.
+  // Oppdaterer hva som vises av Vegvesenets asfaltdata, ut fra alle forbudte veier.
   function markHidden() {
     buildBanIndex();
-    nvdb.items.forEach(function (it) { it.hidden = onBanned(it.parts); });
+    nvdb.items.forEach(function (it) {
+      var clipped = clipParts(it.full);
+      if (clipped === null) {
+        it.parts = it.full;
+        it.bb = bboxOf(it.full);
+        it.hidden = false;
+      } else {
+        it.parts = clipped;
+        it.bb = clipped.length ? bboxOf(clipped) : [1, 1, 0, 0];
+        it.hidden = clipped.length === 0;
+      }
+    });
     if (nvdb.layer) nvdb.layer.redraw();
   }
 
@@ -2032,6 +2053,16 @@ svg.leaflet-image-layer.leaflet-interactive path {
   }
   function nvdbWeight(z) { return [3, 3, 4, 5, 6, 7, 9, 11, 13][Math.min(Math.max(z - 9, 0), 8)]; }
 
+  function bboxOf(parts) {
+    var minX = 1, minY = 1, maxX = 0, maxY = 0;
+    parts.forEach(function (p) {
+      for (var i = 0; i < p.length; i += 2) {
+        if (p[i] < minX) minX = p[i]; if (p[i] > maxX) maxX = p[i];
+        if (p[i + 1] < minY) minY = p[i + 1]; if (p[i + 1] > maxY) maxY = p[i + 1];
+      }
+    });
+    return [minX, minY, maxX, maxY];
+  }
   function buildItem(c) {
     var minX = 1, minY = 1, maxX = 0, maxY = 0;
     var parts = c.p.map(function (flat) {
@@ -2046,7 +2077,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     });
     return {
       id: c.id, type: c.t === 'g' ? 'noasphalt' : 'asphalt', year: c.y, date: c.d,
-      mass: c.m, lag: c.l, thick: c.k, parts: parts, bb: [minX, minY, maxX, maxY]
+      mass: c.m, lag: c.l, thick: c.k, full: parts, parts: parts, bb: [minX, minY, maxX, maxY]
     };
   }
 
