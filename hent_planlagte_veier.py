@@ -11,9 +11,11 @@ Kjøres av GitHub Actions sammen med de andre dataene, eller lokalt:
     python3 hent_planlagte_veier.py
 """
 import datetime
+import http.client
 import json
 import os
 import re
+import socket
 import sys
 import time
 import urllib.error
@@ -26,24 +28,31 @@ AREA = (10.05, 59.55, 11.95, 60.55)
 HEADERS = {"Accept": "application/json", "X-Client": "asfaltkart (GitHub Actions)"}
 
 
-def get_json(url, tries=3):
+# Svar fra NVDB kan bli avbrutt midtveis på store spørringer. Alt dette prøves på nytt.
+RETRY = (urllib.error.URLError, http.client.HTTPException, socket.timeout,
+         ConnectionError, TimeoutError, ValueError, OSError)
+
+
+def get_json(url, tries=5):
     last = None
     for i in range(tries):
         try:
             req = urllib.request.Request(url, headers=HEADERS)
-            with urllib.request.urlopen(req, timeout=90) as r:
-                return json.load(r)
+            with urllib.request.urlopen(req, timeout=120) as r:
+                body = r.read()            # les hele svaret før det tolkes
+            return json.loads(body.decode("utf-8"))
         except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", "replace")[:300]
-            err = RuntimeError("http %s: %s" % (e.code, body))
+            txt = e.read().decode("utf-8", "replace")[:300]
+            err = RuntimeError("http %s: %s" % (e.code, txt))
             err.status = e.code
             if e.code < 500:
                 raise err
             last = err
-        except (urllib.error.URLError, TimeoutError) as e:
+        except RETRY as e:
             last = e
-        time.sleep(2 * (i + 1))
-    raise last
+            print("    avbrutt svar (%s), prøver igjen ..." % type(e).__name__, file=sys.stderr)
+        time.sleep(3 * (i + 1))
+    raise RuntimeError("ga opp etter %d forsøk: %s" % (tries, last))
 
 
 def parse_wkt(wkt):
@@ -78,11 +87,11 @@ def variants(veg):
     num = veg[2:] if veg[:2].upper() == "FV" else veg
     base = VEGNETT + "/veglenkesekvenser/segmentert?"
     return [
-        base + bb + "&vegsystemreferanse=FV" + num + "&antall=1000",
-        base + bb + "&vegsystemreferanse=Fv" + num + "&antall=1000",
-        base + bb + "&vegsystemreferanse=fv" + num + "&antall=1000",
+        base + bb + "&vegsystemreferanse=FV" + num + "&antall=200",
+        base + bb + "&vegsystemreferanse=Fv" + num + "&antall=200",
+        base + bb + "&vegsystemreferanse=fv" + num + "&antall=200",
+        base + bb + "&vegsystemreferanse=FV" + num + "&antall=50",
         base + bb + "&vegsystemreferanse=FV" + num,
-        base + bb + "&vegsystemreferanse=FV" + num + "&geometri=true&antall=1000",
     ]
 
 
@@ -166,7 +175,7 @@ def main():
         print("Henter %s (%d av %d) ..." % (veg, k, len(roads)), flush=True)
         try:
             parts, seen = fetch_road(veg)
-        except (RuntimeError, urllib.error.URLError) as e:
+        except Exception as e:  # noqa: BLE001 - én vei skal aldri stoppe resten
             print("  klarte ikke å hente %s: %s" % (veg, e), file=sys.stderr)
             failed.append(veg)
             continue
