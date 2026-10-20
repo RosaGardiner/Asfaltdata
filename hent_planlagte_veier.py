@@ -73,15 +73,34 @@ def parse_wkt(wkt):
 
 
 def variants(veg):
+    """Vegnett-tjenesten tar ikke parameteren «inkluder»; geometrien følger med av seg selv."""
     bb = "kartutsnitt=" + ",".join("%.5f" % v for v in AREA) + "&srid=4326"
     num = veg[2:] if veg[:2].upper() == "FV" else veg
     base = VEGNETT + "/veglenkesekvenser/segmentert?"
     return [
-        base + bb + "&vegsystemreferanse=FV" + num + "&inkluder=geometri&antall=1000",
-        base + bb + "&vegsystemreferanse=Fv" + num + "&inkluder=geometri&antall=1000",
-        base + bb + "&vegsystemreferanse=fv" + num + "&inkluder=geometri&antall=500",
-        base + bb + "&vegsystemreferanse=FV" + num + "&inkluder=geometri&antall=100",
+        base + bb + "&vegsystemreferanse=FV" + num + "&antall=1000",
+        base + bb + "&vegsystemreferanse=Fv" + num + "&antall=1000",
+        base + bb + "&vegsystemreferanse=fv" + num + "&antall=1000",
+        base + bb + "&vegsystemreferanse=FV" + num,
+        base + bb + "&vegsystemreferanse=FV" + num + "&geometri=true&antall=1000",
     ]
+
+
+def obj_parts(o):
+    """Henter geometri fra et vegnett-objekt, uansett om den ligger på objektet eller på hver lenke."""
+    out = []
+    g = o.get("geometri")
+    if isinstance(g, dict):
+        p = parse_wkt(g.get("wkt"))
+        if p:
+            out.append(p)
+    for key in ("veglenker", "superstedfesting", "segmenter"):
+        sub = o.get(key)
+        if isinstance(sub, list):
+            for x in sub:
+                if isinstance(x, dict):
+                    out.extend(obj_parts(x))
+    return out
 
 
 PREFERRED = [0]
@@ -101,19 +120,21 @@ def fetch_road(veg):
                 continue
             raise
         PREFERRED[0] = i
-        parts, seen = [], 0
+        parts, seen, sample = [], 0, None
         while True:
-            objs = data.get("objekter") or data.get("vegnett") or []
+            objs = data.get("objekter") or data.get("vegnett") or data.get("veglenkesekvenser") or []
             for o in objs:
                 seen += 1
-                g = o.get("geometri") or {}
-                p = parse_wkt(g.get("wkt"))
-                if p:
+                if sample is None:
+                    sample = o
+                for p in obj_parts(o):
                     parts.extend(p)
             nxt = ((data.get("metadata") or {}).get("neste") or {}).get("href")
             if not objs or not nxt:
                 break
             data = get_json(nxt)
+        if not parts and sample is not None:
+            print("  svaret hadde ingen geometri. Felter i første objekt: %s" % ", ".join(sorted(sample.keys())), file=sys.stderr)
         return parts, seen
     raise last
 
