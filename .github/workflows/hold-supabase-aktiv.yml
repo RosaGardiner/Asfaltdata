@@ -1,0 +1,20 @@
+# Valgfri. Sender en liten forespørsel til databasen hver uke, så gratisprosjektet i Supabase
+# ikke settes på pause av inaktivitet. Det er ingen garanti. Leser adressen og nøkkelen fra konfig.js.
+name: Hold databasen våken
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Spør databasen
+        run: |
+          URL=$(grep -o "supabaseUrl: *'[^']*'" konfig.js | sed "s/.*'\(.*\)'/\1/")
+          KEY=$(grep -o "supabaseKey: *'[^']*'" konfig.js | sed "s/.*'\(.*\)'/\1/")
+          if [ -z "$URL" ] || [ -z "$KEY" ]; then echo "konfig.js er ikke fylt ut ennå"; exit 0; fi
+          curl -fsS "$URL/rest/v1/marks?select=id&limit=1" -H "apikey: $KEY" -o /dev/null -w "Svar: %{http_code}\n"
