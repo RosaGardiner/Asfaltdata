@@ -843,6 +843,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
   /* ---------- Map ---------- */
   #stage { position: relative; flex: 1; min-width: 0; height: 100%; }
   #map { position: absolute; inset: 0; background: #e6e6e1; }
+  /* Demper fargene i bakgrunnskartet, så de fargede strekningene står tydeligere fram. */
+  .leaflet-tile-pane { filter: saturate(0.45) brightness(1.05) contrast(0.96); }
+  .map-full .leaflet-tile-pane { filter: none; }
   .leaflet-container.drawing { cursor: crosshair; }
   .leaflet-container.drawing .seg-badge { pointer-events: none; }
   .leaflet-container { font-family: inherit; }
@@ -951,6 +954,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   }
   .field textarea { resize: vertical; min-height: 76px; }
   .seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .seg label.wide { grid-column: 1 / -1; }
   .seg label { position: relative; }
   .seg input { position: absolute; opacity: 0; inset: 0; cursor: pointer; }
   .seg span {
@@ -1053,6 +1057,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
       <label class="check"><input type="checkbox" id="fNvdb" checked> Vis Vegvesenets data</label>
       <p class="note" id="nvStatus" aria-live="polite"></p>
       <label class="check"><input type="checkbox" id="fBan" checked> Grå ut veier der sykling er forbudt</label>
+      <label class="check"><input type="checkbox" id="fMuted" checked> Dempet bakgrunnskart</label>
       <p class="note" id="banStatus" aria-live="polite"></p>
       <p class="note">Kilde: Statens vegvesen, Nasjonal vegdatabank (NVDB), Norsk lisens for offentlige data (NLOD). Datoen er når dekket ble registrert lagt, og kan mangle eller være unøyaktig.</p>
     </section>
@@ -1109,6 +1114,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
         <label><input type="radio" name="type" value="asphalt" checked><span>Asfalt</span></label>
         <label><input type="radio" name="type" value="roadwork"><span>Veiarbeid</span></label>
         <label><input type="radio" name="type" value="noasphalt"><span>Mangler asfalt</span></label>
+        <label class="wide"><input type="radio" name="type" value="nocycle"><span>Sykling forbudt</span></label>
       </div>
     </div>
 
@@ -1166,8 +1172,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
   var MARK_ALPHA = 0.5;  // gjennomsiktighet for asfaltmarkeringer (1 = dekkende)
   var DASH_ALPHA = 0.75; // for stiplede linjer (veiarbeid, grus)
 
-  var TYPE_LABEL = { asphalt: 'Asfalt', roadwork: 'Veiarbeid', noasphalt: 'Mangler asfalt' };
-  var TYPE_COLOR = { roadwork: '#7048e8', noasphalt: '#6b4f3a' };
+  var TYPE_LABEL = { asphalt: 'Asfalt', roadwork: 'Veiarbeid', noasphalt: 'Mangler asfalt', nocycle: 'Sykling forbudt' };
+  var BAN_COLOR = '#4b5563';
+  var TYPE_COLOR = { roadwork: '#7048e8', noasphalt: '#6b4f3a', nocycle: BAN_COLOR };
   var UNKNOWN_COLOR = '#7a8590';
   // Alder regnes i hele kalenderår (inneværende år minus leggeår).
   var AGE_BINS = [
@@ -1423,10 +1430,12 @@ svg.leaflet-image-layer.leaflet-interactive path {
       asphalt: $('fAsphalt').checked,
       roadwork: $('fRoadwork').checked,
       noasphalt: $('fNo').checked,
+      nocycle: $('fBan').checked,
       maxAge: +$('ageRange').value
     };
   }
   function passes(s, f) {
+    if (s.type === 'nocycle') return !!f.nocycle;
     if (!f[s.type]) return false;
     if (s.type === 'asphalt' && f.maxAge < AGE_ALL) {
       if (s.year == null) return false;
@@ -1442,6 +1451,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   }
 
   function styleFor(s) {
+    if (s.type === 'nocycle')   return { color: BAN_COLOR, weight: 8, opacity: 0.6, dash: null, cap: 'butt' };
     if (s.type === 'roadwork')  return { color: TYPE_COLOR.roadwork,  weight: 6, opacity: DASH_ALPHA, dash: '10 9', cap: 'butt' };
     if (s.type === 'noasphalt') return { color: TYPE_COLOR.noasphalt, weight: 6, opacity: DASH_ALPHA, dash: '1 9',  cap: 'round' };
     return { color: colorFor(s), weight: 9, opacity: MARK_ALPHA, dash: null, cap: 'round' };
@@ -1462,6 +1472,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
       el.appendChild(p);
     }
     if (s.type === 'asphalt' && s.year != null) line(ageText(s.year));
+    if (s.type === 'nocycle') line('Sjekk alltid skiltingen på stedet.');
     if (s.type === 'roadwork' && s.until) line('Forventet ferdig: ' + s.until);
     if (s.note) line(s.note);
     line('Meldt inn av: ' + (s.by ? s.by : 'anonym'), 'meta');
@@ -1579,12 +1590,78 @@ svg.leaflet-image-layer.leaflet-interactive path {
     $('empty').hidden = segments.length > 0;
   }
 
+  // Asfaltalder vises ikke der sykling er forbudt. Her bygges et rutenett over alle
+  // forbudte strekninger, både Vegvesenets og dem folk har markert selv.
+  var BAN_CELL = 1e-5;          // ca. 200 m i normaliserte koordinater
+  var BAN_TOL = 6e-7;           // ca. 8 m
+  var banIndex = null;
+  function banAddSeg(idx, ax, ay, bx, by) {
+    var x0 = Math.floor(Math.min(ax, bx) / BAN_CELL), x1 = Math.floor(Math.max(ax, bx) / BAN_CELL);
+    var y0 = Math.floor(Math.min(ay, by) / BAN_CELL), y1 = Math.floor(Math.max(ay, by) / BAN_CELL);
+    for (var x = x0; x <= x1; x++) {
+      for (var y = y0; y <= y1; y++) {
+        var k = x + ':' + y;
+        (idx[k] || (idx[k] = [])).push(ax, ay, bx, by);
+      }
+    }
+  }
+  function buildBanIndex() {
+    var idx = {};
+    bans.items.forEach(function (it) {
+      it.parts.forEach(function (p) {
+        for (var i = 2; i < p.length; i += 2) banAddSeg(idx, p[i - 2], p[i - 1], p[i], p[i + 1]);
+      });
+    });
+    segments.forEach(function (s) {
+      if (s.type !== 'nocycle') return;
+      for (var i = 1; i < s.coords.length; i++) {
+        var a = toNorm(s.coords[i - 1][0], s.coords[i - 1][1]);
+        var b = toNorm(s.coords[i][0], s.coords[i][1]);
+        banAddSeg(idx, a[0], a[1], b[0], b[1]);
+      }
+    });
+    banIndex = idx;
+  }
+  function nearBan(x, y) {
+    if (!banIndex) return false;
+    var cx = Math.floor(x / BAN_CELL), cy = Math.floor(y / BAN_CELL), t2 = BAN_TOL * BAN_TOL;
+    for (var i = -1; i <= 1; i++) {
+      for (var j = -1; j <= 1; j++) {
+        var arr = banIndex[(cx + i) + ':' + (cy + j)];
+        if (!arr) continue;
+        for (var k = 0; k < arr.length; k += 4) {
+          if (segDist2(x, y, arr[k], arr[k + 1], arr[k + 2], arr[k + 3]) <= t2) return true;
+        }
+      }
+    }
+    return false;
+  }
+  function onBanned(parts) {
+    var tot = 0, hit = 0;
+    for (var k = 0; k < parts.length; k++) {
+      var p = parts[k];
+      for (var i = 0; i < p.length; i += 2) {
+        tot++;
+        if (nearBan(p[i], p[i + 1])) hit++;
+      }
+    }
+    return tot > 0 && hit / tot >= 0.8;
+  }
+  // Merker Vegvesenets asfaltstrekninger som ligger på en forbudt vei, så de ikke tegnes.
+  function markHidden() {
+    buildBanIndex();
+    nvdb.items.forEach(function (it) { it.hidden = onBanned(it.parts); });
+    if (nvdb.layer) nvdb.layer.redraw();
+  }
+
   function render() {
     segLayer.clearLayers();
     var f = filters();
     var visible = segments.filter(function (s) { return passes(s, f); });
     visible.forEach(addSegLayer);
     renderList(visible);
+    var ban = segments.filter(function (s) { return s.type === 'nocycle'; }).length;
+    if (ban !== render.lastBans) { render.lastBans = ban; markHidden(); }
     if (nvdb.layer) nvdb.layer.redraw();
   }
 
@@ -1747,6 +1824,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
     var t = currentType();
     $('yearRow').hidden = t !== 'asphalt';
     $('untilRow').hidden = t !== 'roadwork';
+    $('noteIn').placeholder = t === 'nocycle'
+      ? 'Hva slags forbud? For eksempel rampe til E6, eller skiltet forbudt.'
+      : 'Hvordan er dekket? Er det grus, hull eller omkjøring?';
   }
   document.querySelectorAll('input[name="type"]').forEach(function (r) {
     r.addEventListener('change', syncFormRows);
@@ -1913,7 +1993,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
   // Veier der sykling er forbudt (motorveg og skiltet forbud). Filen lages av oppdater_vegdata.py.
   var BAN_FILE = DATA_BASE + 'ikke-sykkel.json';
   var BAN_KEY = 'nvdb-ikke-sykkel';
-  var BAN_COLOR = '#4b5563';
   var bans = { items: [], fetchedAt: null, stats: null, layer: null };
 
   var dataDbPromise = null;
@@ -2061,7 +2140,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     items: function () { return nvdb.items; },
     enabled: function () { return $('fNvdb').checked; },
     filter: filters,
-    visible: passes,
+    visible: function (it, f) { return !it.hidden && passes(it, f); },
     paint: function (ctx, it, weight) {
       if (it.type === 'noasphalt') {
         ctx.globalAlpha = DASH_ALPHA; ctx.lineCap = 'round';
@@ -2167,7 +2246,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     nvdb.items = rec.items.filter(function (c) { return !tooOld(c); }).map(buildItem);
     nvdb.fetchedAt = rec.fetched;
     nvdb.stats = rec.stats;
-    nvdb.layer.redraw();
+    markHidden();
     nvdbSummary();
   }
   // Viser lagret kopi med en gang (virker uten nett), og henter så siste versjon av datafilen.
@@ -2198,10 +2277,20 @@ svg.leaflet-image-layer.leaflet-interactive path {
     bans.fetchedAt = rec.fetched;
     bans.stats = rec.stats;
     bans.layer.redraw();
+    markHidden();
     banSummary();
   }
   function banLoad() { loadStatic(BAN_FILE, BAN_KEY, banApply, banSummary); }
-  $('fBan').addEventListener('change', function () { bans.layer.redraw(); });
+  $('fBan').addEventListener('change', function () { bans.layer.redraw(); render(); });
+  var MUTED_KEY = 'asfaltkart:muted';
+  function applyMuted() {
+    var on = $('fMuted').checked;
+    map.getContainer().classList.toggle('map-full', !on);
+    try { localStorage.setItem(MUTED_KEY, on ? '1' : '0'); } catch (e) { /* ignorer */ }
+  }
+  $('fMuted').addEventListener('change', applyMuted);
+  try { if (localStorage.getItem(MUTED_KEY) === '0') $('fMuted').checked = false; } catch (e) { /* ignorer */ }
+  applyMuted();
   $('fNvdb').addEventListener('change', function () { nvdb.layer.redraw(); });
 
   /* ================= Delte markeringer (Supabase) ================= */
