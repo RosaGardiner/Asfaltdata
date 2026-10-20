@@ -672,6 +672,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
 	}
 
 </style>
+<script src="konfig.js"></script>
 <style>
   :root {
     --ink: #1f2a30;
@@ -1036,14 +1037,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 
     <section>
       <h2>Data fra Statens vegvesen</h2>
-      <p class="note first">Henter når asfalten ble lagt på riks-, fylkes- og kommunale veier i Oslo og Akershus, fra Nasjonal vegdatabank. Dataene lagres på enheten og virker uten nett. Grusveier vises som «Mangler asfalt».</p>
+      <p class="note first">Når asfalten ble lagt på riks-, fylkes- og kommunale veier i Oslo og Akershus. Grusveier vises som «Mangler asfalt».</p>
       <label class="check"><input type="checkbox" id="fNvdb" checked> Vis Vegvesenets data</label>
-      <div class="data-row">
-        <button id="nvStart" class="btn small">Hent asfaltdata</button>
-        <button id="nvCancel" class="btn small" hidden>Avbryt</button>
-        <button id="nvClear" class="btn small">Slett</button>
-      </div>
-      <progress id="nvBar" max="100" value="0" hidden></progress>
       <p class="note" id="nvStatus" aria-live="polite"></p>
       <p class="note">Kilde: Statens vegvesen, Nasjonal vegdatabank (NVDB), Norsk lisens for offentlige data (NLOD). Datoen er når dekket ble registrert lagt, og kan mangle eller være unøyaktig.</p>
     </section>
@@ -1078,7 +1073,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
         <button id="btnImport" class="btn small">Importer</button>
         <input type="file" id="fileImport" accept=".geojson,.json,application/geo+json,application/json" hidden>
       </div>
-      <p class="note" id="storeNote">Strekningene lagres bare i denne nettleseren. Eksporter en fil for å dele dem eller ta sikkerhetskopi.</p>
+      <p class="note" id="sharedStatus" aria-live="polite"></p>
+      <p class="note" id="storeNote">Eksporter en fil for å ta sikkerhetskopi av strekningene dine.</p>
     </section>
   </div>
 </aside>
@@ -1133,6 +1129,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
       <label for="noteIn">Kommentar (valgfritt)</label>
       <textarea id="noteIn" maxlength="300" placeholder="Hvordan er dekket? Er det grus, hull eller omkjøring?"></textarea>
     </div>
+    <p class="note" id="sharedHint" hidden>Strekningen og kommentaren blir synlige for alle som åpner kartet. Ikke skriv personopplysninger.</p>
 
     <p id="formErr" role="alert"></p>
 
@@ -1148,6 +1145,10 @@ svg.leaflet-image-layer.leaflet-interactive path {
   'use strict';
 
   /* ================= Konfigurasjon ================= */
+  // Delte markeringer settes opp i konfig.js (ved siden av denne filen). Tomt = bare lagring på enheten.
+  var CFG = window.ASFALTKART_KONFIG || {};
+  var SHARED_URL = String(CFG.supabaseUrl || '').replace(/\/+$/, '');
+  var SHARED_KEY = String(CFG.supabaseKey || '');
   var YEAR = new Date().getFullYear();
   var STORE_KEY = 'asfaltkart:v1';
   var AGE_ALL = 16; // verdi på glideren som betyr «alle aldre»
@@ -1247,7 +1248,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
     } catch (e) { memoryOnly = true; showStoreWarning(); }
   }
   function save() {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(segments)); }
+    // Delte markeringer hentes på nytt fra databasen; her lagres bare lokale og de som venter på å bli sendt.
+    var mine = segments.filter(function (s) { return !s.remote || s.pending; });
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(mine)); }
     catch (e) { memoryOnly = true; showStoreWarning(); }
   }
 
@@ -1594,7 +1597,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
     if (s.type === 'asphalt' && s.year != null) line(ageText(s.year));
     if (s.type === 'roadwork' && s.until) line('Forventet ferdig: ' + s.until);
     if (s.note) line(s.note);
-    line(fmtKm(lengthKm(s.coords)) + ', lagt inn ' + fmtDate(s.created), 'meta');
+    line(fmtKm(lengthKm(s.coords)) + ', lagt inn ' + fmtDate(s.created) + (s.remote ? ', delt med alle' : ''), 'meta');
+    if (!canEdit(s)) return el;
 
     var actions = document.createElement('div');
     actions.className = 'actions';
@@ -1619,9 +1623,16 @@ svg.leaflet-image-layer.leaflet-interactive path {
         return;
       }
       clearTimeout(armTimer);
-      segments = segments.filter(function (x) { return x.id !== s.id; });
-      save(); map.closePopup(); render();
-      toast('Strekningen er slettet.');
+      map.closePopup();
+      var finish = function () {
+        segments = segments.filter(function (x) { return x.id !== s.id; });
+        delete tokens[s.id]; saveTokens();
+        save(); render();
+        toast('Strekningen er slettet.');
+      };
+      if (s.remote && !s.pending) {
+        sharedDelete(s).then(function (ok) { if (ok) finish(); else toast('Fikk ikke slettet i delt kart. Prøv igjen med nett.'); });
+      } else finish();
     });
 
     actions.appendChild(edit);
@@ -1882,6 +1893,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     $('untilIn').value = existing && existing.until ? existing.until : '';
     $('noteIn').value = existing && existing.note ? existing.note : '';
     $('formErr').textContent = '';
+    $('sharedHint').hidden = !(sharedOn() && (!existing || existing.remote));
     syncFormRows();
     $('modal').hidden = false;
     var first = document.querySelector('input[name="type"]:checked');
@@ -1905,28 +1917,51 @@ svg.leaflet-image-layer.leaflet-interactive path {
 
     if (state.editingId) {
       var s = segments.filter(function (x) { return x.id === state.editingId; })[0];
-      if (s) { s.type = type; s.year = year; s.note = note; s.until = until; }
       closeForm();
       state.mode = 'view';
       state.editingId = null;
-      save(); render();
-      toast('Endringene er lagret.');
+      if (!s) return;
+      var apply = function () {
+        s.type = type; s.year = year; s.note = note; s.until = until;
+        save(); render();
+        toast('Endringene er lagret.');
+      };
+      if (s.remote && !s.pending) {
+        sharedUpdate(s, type, year, note, until).then(function (ok) {
+          if (ok) apply(); else toast('Fikk ikke lagret endringen i delt kart. Prøv igjen med nett.');
+        });
+      } else apply();
       return;
     }
 
     var coords = segCoords().map(function (c) { return [round5(c[0]), round5(c[1])]; });
     if (coords.length < 2) { $('formErr').textContent = 'Strekningen mangler punkter. Gå tilbake og sett flere.'; return; }
-    segments.push({
+    var seg = {
       id: uid(), type: type, year: year, note: note, until: until,
       coords: coords, created: new Date().toISOString()
-    });
+    };
+    if (sharedOn()) {
+      seg.id = newId(); seg.remote = true; seg.pending = true;
+      tokens[seg.id] = newToken(); saveTokens();
+    }
+    segments.push(seg);
     closeForm();
     clearDraft();
     state.mode = 'view';
     setDrawUI(false);
     save(); render();
     map.fitBounds(L.latLngBounds(coords), { maxZoom: 15, padding: [60, 60] });
-    toast('Strekningen er lagret.');
+    if (seg.remote) {
+      toast('Strekningen er lagret. Sender til delt kart …');
+      sharedPost(seg).then(function (ok) {
+        if (ok) toast('Strekningen er lagret og delt med alle.');
+        else if (seg.remote) toast('Lagret på enheten. Deles når du har nett.');
+        // ellers avviste databasen den, og sharedPost har allerede gitt beskjed
+        sharedStatus();
+      });
+    } else {
+      toast('Strekningen er lagret.');
+    }
   }
 
   function cancelForm() {
@@ -2081,11 +2116,10 @@ svg.leaflet-image-layer.leaflet-interactive path {
 
 
   /* ================= Data fra Statens vegvesen (NVDB) ================= */
-  // Objekttype 241 «Vegdekke» har egenskapen «Dekkeleggingsdato» (id 5136) og «Massetype» (id 1216).
-  var NVDB_URL = 'https://nvdbapiles.atlas.vegvesen.no/vegobjekter/api/v4/vegobjekter/241';
+  // Datafilen vegdekke.json lages av eieren av siden (oppdater_vegdata.py) og ligger ved siden av siden.
+  var NVDB_FILE = 'vegdekke.json';
   var NVDB_KEY = 'nvdb-vegdekke';
-  var NOT_ASPHALT = /^(betong|valsebetong|brostein|gatestein|belegningsstein|stålgitter|tre$)/i;
-  var nvdb = { items: [], fetchedAt: null, stats: null, layer: null, running: false, cancel: false };
+  var nvdb = { items: [], fetchedAt: null, stats: null, layer: null };
 
   var dataDbPromise = null;
   function openDataDB() {
@@ -2119,78 +2153,10 @@ svg.leaflet-image-layer.leaflet-interactive path {
       });
     }).catch(function () { return false; });
   }
-  function kvDelete(key) {
-    return openDataDB().then(function (db) {
-      return new Promise(function (resolve) {
-        var tx = db.transaction('kv', 'readwrite');
-        tx.objectStore('kv')['delete'](key);
-        tx.oncomplete = function () { resolve(true); };
-        tx.onerror = function () { resolve(false); };
-      });
-    }).catch(function () { return false; });
-  }
-
   function toNorm(lat, lon) {
     return [(lon + 180) / 360, 0.5 - Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360)) / (2 * Math.PI)];
   }
   function nvdbWeight(z) { return [3, 3, 4, 5, 6, 7, 9, 11, 13][Math.min(Math.max(z - 9, 0), 8)]; }
-
-  // WKT til liste med linjestykker [lat, lon, lat, lon, ...]. Tåler Z/M og både lat,lon og lon,lat.
-  function parseWkt(wkt) {
-    if (typeof wkt !== 'string') return null;
-    var m = /^\s*(MULTI)?LINESTRING\s*(ZM|Z|M)?\s*\(([\s\S]*)\)\s*$/i.exec(wkt);
-    if (!m) return null;
-    var rings = m[1] ? m[3].split(/\)\s*,\s*\(/) : [m[3]];
-    var parts = [];
-    for (var r = 0; r < rings.length; r++) {
-      var pts = rings[r].replace(/[()]/g, '').split(',');
-      var out = [];
-      for (var i = 0; i < pts.length; i++) {
-        var p = pts[i].trim().split(/\s+/);
-        var a = Number(p[0]), b = Number(p[1]);
-        if (!isFinite(a) || !isFinite(b)) continue;
-        if (Math.abs(a) > 360 || Math.abs(b) > 360) return null; // ikke WGS84
-        var lat, lon;
-        if (a >= 50 && a <= 72 && b >= 3 && b <= 32) { lat = a; lon = b; } else { lat = b; lon = a; }
-        out.push(round5(lat), round5(lon));
-      }
-      if (out.length >= 4) parts.push(out);
-    }
-    return parts.length ? parts : null;
-  }
-
-  function propVal(e) {
-    var v = e && e.verdi;
-    if (Array.isArray(v)) v = v[0];
-    if (v && typeof v === 'object') v = v.verdi != null ? v.verdi : v.navn;
-    return v == null ? null : v;
-  }
-
-  // Tolker ett Vegdekke-objekt fra API-et. Returnerer kompakt objekt eller null, og teller i st.
-  function parseNvdbObject(o, st) {
-    var date = null, mass = null, lag = null, thick = null;
-    (o.egenskaper || []).forEach(function (e) {
-      var nm = String(e.navn || '').toLowerCase();
-      if (e.id === 5136 || nm === 'dekkeleggingsdato') date = propVal(e);
-      else if (e.id === 1216 || nm === 'massetype') mass = propVal(e);
-      else if (e.id === 8741 || nm === 'lagtype') lag = propVal(e);
-      else if (e.id === 1642 || nm === 'dekketykkelse') thick = propVal(e);
-    });
-    var g = o.geometri || (o.lokasjon && o.lokasjon.geometri);
-    var parts = g ? parseWkt(g.wkt) : null;
-    if (!parts) { st.nogeom++; return null; }
-    mass = mass == null ? '' : String(mass);
-
-    if (/^grus$/i.test(mass)) {
-      st.gravel++;
-      return { id: o.id, t: 'g', y: null, d: null, m: mass, l: lag, k: thick, p: parts };
-    }
-    if (NOT_ASPHALT.test(mass)) { st.other++; return null; }
-    var year = typeof date === 'string' ? parseInt(date.slice(0, 4), 10) : NaN;
-    if (!isFinite(year) || year < 1900 || year > YEAR) { st.nodate++; return null; }
-    st.asphalt++;
-    return { id: o.id, t: 'a', y: year, d: date, m: mass, l: lag, k: thick, p: parts };
-  }
 
   function buildItem(c) {
     var minX = 1, minY = 1, maxX = 0, maxY = 0;
@@ -2323,171 +2289,166 @@ svg.leaflet-image-layer.leaflet-interactive path {
     }
     if (it.mass) line('Massetype: ' + it.mass);
     if (it.thick != null && isFinite(it.thick)) line('Dekketykkelse: ' + it.thick + ' mm');
-    line('Kilde: Statens vegvesen (NVDB)' + (nvdb.fetchedAt ? ', hentet ' + fmtDate(nvdb.fetchedAt) : ''), 'meta');
+    line('Kilde: Statens vegvesen (NVDB)' + (nvdb.fetchedAt ? ', oppdatert ' + fmtDate(nvdb.fetchedAt) : ''), 'meta');
     L.popup({ maxWidth: 280 }).setLatLng(latlng).setContent(el).openOn(map);
   }
 
   function nvdbSummary() {
     var el = $('nvStatus');
-    if (!nvdb.items.length) { el.textContent = 'Ingen data hentet ennå.'; return; }
+    if (!nvdb.items.length) { el.textContent = 'Ingen Vegvesen-data er publisert ennå.'; return; }
     var a = 0, g = 0;
     nvdb.items.forEach(function (it) { if (it.type === 'asphalt') a++; else g++; });
-    var s = nvdb.stats || {};
-    el.textContent = 'Lagret: ' + fmtInt(a) + ' asfaltstrekninger og ' + fmtInt(g) + ' grusstrekninger, hentet ' + fmtDate(nvdb.fetchedAt) +
-      '. Hoppet over: ' + fmtInt(s.nodate || 0) + ' uten dato, ' + fmtInt(s.other || 0) + ' med andre dekketyper.';
+    el.textContent = 'Fra Vegvesenet: ' + fmtInt(a) + ' asfaltstrekninger og ' + fmtInt(g) + ' grusstrekninger. Oppdatert ' + fmtDate(nvdb.fetchedAt) + '.';
   }
+  function nvdbApply(rec) {
+    nvdb.items = rec.items.map(buildItem);
+    nvdb.fetchedAt = rec.fetched;
+    nvdb.stats = rec.stats;
+    nvdb.layer.redraw();
+    nvdbSummary();
+  }
+  // Viser lagret kopi med en gang (virker uten nett), og henter så siste versjon av datafilen.
+  function nvdbLoad() {
+    kvGet(NVDB_KEY).then(function (rec) {
+      if (rec && Array.isArray(rec.items)) nvdbApply(rec); else nvdbSummary();
+      return fetch(NVDB_FILE, { cache: 'no-cache' })
+        .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+        .then(function (data) {
+          if (!data || !Array.isArray(data.items)) throw new Error('ugyldig fil');
+          if (rec && rec.fetched === data.fetched) return; // samme versjon som lagret
+          nvdbApply(data);
+          kvPut(NVDB_KEY, data);
+        });
+    }).catch(function () { nvdbSummary(); }); // ingen fil ennå, eller uten nett: behold lagret kopi
+  }
+  $('fNvdb').addEventListener('change', function () { nvdb.layer.redraw(); });
 
-  function nvdbCells() {
-    var cols = 4, rows = 3, out = [];
-    var w = AREA.getWest(), s = AREA.getSouth();
-    var dx = (AREA.getEast() - w) / cols, dy = (AREA.getNorth() - s) / rows;
-    for (var r = 0; r < rows; r++) for (var c = 0; c < cols; c++) out.push([w + c * dx, s + r * dy, w + (c + 1) * dx, s + (r + 1) * dy]);
-    return out;
+  /* ================= Delte markeringer (Supabase) ================= */
+  var TOKENS_KEY = 'asfaltkart:tokens';
+  var tokens = {};
+  var shared = { ok: null, when: 0 };
+
+  function sharedOn() { return !!(SHARED_URL && SHARED_KEY); }
+  function loadTokens() {
+    try { tokens = JSON.parse(localStorage.getItem(TOKENS_KEY) || '{}') || {}; } catch (e) { tokens = {}; }
   }
-  // Flere varianter av samme spørring. Appen prøver dem i rekkefølge hvis serveren svarer 400 (ugyldig forespørsel),
-  // og husker den første som virker.
-  function nvdbVariants(b) {
-    var bb = '?kartutsnitt=' + b.map(function (v) { return v.toFixed(5); }).join(',');
-    return [
-      NVDB_URL + bb + '&srid=4326&inkluder=egenskaper,geometri&antall=500',
-      NVDB_URL + bb + '&srid=4326&inkluder=egenskaper,geometri&antall=100',
-      NVDB_URL + bb + '&srid=4326&inkluder=egenskaper&inkluder=geometri&antall=100',
-      NVDB_URL + bb + '&srid=wgs84&inkluder=egenskaper,geometri&antall=100',
-      NVDB_URL + bb + '&srid=4326&inkluder=alle&antall=100'
-    ];
+  function saveTokens() { try { localStorage.setItem(TOKENS_KEY, JSON.stringify(tokens)); } catch (e) { /* ignorer */ } }
+  function randomHex(n) {
+    var a = new Uint8Array(n);
+    (window.crypto || window.msCrypto).getRandomValues(a);
+    return Array.prototype.map.call(a, function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
   }
-  function serverMessage(txt) {
-    if (!txt) return '';
-    try {
-      var j = JSON.parse(txt);
-      var m = j.message || j.melding || j.detail || j.title || j.error || (Array.isArray(j) && j[0] && (j[0].message || j[0].melding));
-      if (m) return String(m).slice(0, 300);
-    } catch (e) { /* ikke JSON */ }
-    return String(txt).replace(/\s+/g, ' ').slice(0, 300);
+  function newToken() { return randomHex(16); }
+  function newId() {
+    if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+    var h = randomHex(16);
+    return h.slice(0, 8) + '-' + h.slice(8, 12) + '-4' + h.slice(13, 16) + '-a' + h.slice(17, 20) + '-' + h.slice(20, 32);
   }
-  function getJson(url) {
-    return fetch(url).then(function (r) {
-      if (r.ok) return r.json();
+  // Brukeren kan endre og slette det hun selv har laget (hemmelig nøkkel lagres i nettleseren), og lokale strekninger.
+  function canEdit(s) { return !s.remote || !!tokens[s.id]; }
+
+  function sbFetch(path, opts) {
+    opts = opts || {};
+    var h = { apikey: SHARED_KEY, 'Content-Type': 'application/json' };
+    if (/^eyJ/.test(SHARED_KEY)) h.Authorization = 'Bearer ' + SHARED_KEY;
+    for (var k in (opts.headers || {})) h[k] = opts.headers[k];
+    opts.headers = h;
+    return fetch(SHARED_URL + path, opts).then(function (r) {
+      if (r.ok) return r;
       return r.text().then(function (txt) {
-        var msg = serverMessage(txt);
-        if (window.console) console.log('NVDB-feil', r.status, url, txt);
-        var e = new Error('http ' + r.status + (msg ? ': ' + msg : ''));
+        var e = new Error('http ' + r.status + (txt ? ': ' + String(txt).slice(0, 200) : ''));
         e.status = r.status;
         throw e;
       });
     });
   }
-  function firstPage(b) {
-    var vs = nvdbVariants(b), first = nvdb.variant || 0, order = [first], i;
-    for (i = 0; i < vs.length; i++) if (i !== first) order.push(i);
-    function attempt(k, lastErr) {
-      if (k >= order.length) return Promise.reject(lastErr);
-      return getJson(vs[order[k]]).then(function (j) {
-        nvdb.variant = order[k];
-        return j;
-      }, function (e) {
-        if (e.status === 400) return attempt(k + 1, e); // prøv neste variant
-        throw e;
-      });
-    }
-    return attempt(0, null);
+
+  function rowToSeg(r) {
+    return {
+      id: String(r.id), type: r.type, year: r.year == null ? null : Number(r.year),
+      note: r.note || '', until: r.until_text || '', coords: r.coords, created: r.created_at, remote: true
+    };
   }
-
-  function setNvUI(running) {
-    nvdb.running = running;
-    $('nvStart').hidden = running;
-    $('nvClear').hidden = running;
-    $('nvCancel').hidden = !running;
-    $('nvBar').hidden = !running;
+  function mergeRemote(rows) {
+    var pending = {};
+    segments.forEach(function (s) { if (s.remote && s.pending) pending[s.id] = true; });
+    var keep = segments.filter(function (s) { return !s.remote || s.pending; });
+    var add = rows.map(rowToSeg).filter(function (s) { return validSeg(s) && !pending[s.id]; });
+    segments = keep.concat(add);
   }
-
-  function startNvdb() {
-    if (nvdb.running) return;
-    nvdb.cancel = false;
-    setNvUI(true);
-    $('nvBar').value = 0;
-    var cells = nvdbCells(), qi = 0, doneCells = 0, failed = null, seen = {}, found = {};
-    var st = { got: 0, asphalt: 0, gravel: 0, nodate: 0, other: 0, nogeom: 0 };
-    var sample = null;
-
-    function progress() {
-      $('nvBar').value = Math.round(doneCells / cells.length * 100);
-      $('nvStatus').textContent = 'Henter fra Vegvesenet: rute ' + doneCells + ' av ' + cells.length + ', ' + fmtInt(st.got) + ' objekter så langt.';
+  function sharedFetchAll() {
+    var out = [], page = 1000;
+    function next(off) {
+      return sbFetch('/rest/v1/marks?select=id,created_at,type,year,note,until_text,coords&order=created_at.asc&limit=' + page + '&offset=' + off)
+        .then(function (r) { return r.json(); })
+        .then(function (rows) {
+          out = out.concat(rows);
+          if (rows.length === page && off < 50000) return next(off + page);
+          return out;
+        });
     }
-    function handle(j) {
-      if (nvdb.cancel || failed) return;
-      var objs = (j && j.objekter) || [];
-      objs.forEach(function (o) {
-        if (!o || seen[o.id]) return;
-        seen[o.id] = true; st.got++;
-        if (!sample) sample = o;
-        var c = parseNvdbObject(o, st);
-        if (c) found[o.id] = c;
-      });
-      var next = j && j.metadata && j.metadata.neste && j.metadata.neste.href;
-      progress();
-      if (objs.length && next) return getJson(next).then(handle);
-    }
-    function worker() {
-      if (nvdb.cancel || failed || qi >= cells.length) return Promise.resolve();
-      var b = cells[qi++];
-      return firstPage(b).then(handle).catch(function (e) { failed = e; }).then(function () { doneCells++; progress(); return worker(); });
-    }
-    var ws = [];
-    for (var i = 0; i < 3; i++) ws.push(worker());
-    Promise.all(ws).then(function () {
-      setNvUI(false);
-      if (nvdb.cancel) { nvdbSummary(); toast('Henting avbrutt. Tidligere lagrede data er beholdt.'); return; }
-      if (failed) {
-        nvdbSummary();
-        var why = failed.message || 'ukjent feil';
-        $('nvStatus').textContent += ' Siste feil fra Vegvesenet: ' + why;
-        toast('Fikk ikke hentet data fra Vegvesenet (' + why + ').');
-        return;
-      }
-      var list = Object.keys(found).map(function (k) { return found[k]; });
-      if (!list.length) {
-        if (window.console && sample) console.log('NVDB-eksempel (fant ingen brukbare vegdekker):', sample);
-        nvdbSummary();
-        toast(st.got
-          ? 'Fikk svar fra Vegvesenet, men fant ingen strekninger med dato og geometri. Tidligere data er beholdt.'
-          : 'Vegvesenet returnerte ingen vegdekker for dette området.');
-        return;
-      }
-      var fetched = new Date().toISOString();
-      kvPut(NVDB_KEY, { fetched: fetched, stats: st, items: list }).then(function (ok) {
-        nvdb.items = list.map(buildItem);
-        nvdb.fetchedAt = fetched;
-        nvdb.stats = st;
-        nvdb.layer.redraw();
-        nvdbSummary();
-        toast(ok ? 'Asfaltdata fra Vegvesenet er hentet og lagret.' : 'Dataene er hentet, men kunne ikke lagres på enheten. De forsvinner når du lukker siden.');
-      });
+    return next(0);
+  }
+  function sharedStatus() {
+    var el = $('sharedStatus');
+    if (!sharedOn()) { el.textContent = 'Delte markeringer er ikke satt opp. Strekninger lagres bare på denne enheten.'; return; }
+    var n = 0, p = 0;
+    segments.forEach(function (s) { if (s.remote) { n++; if (s.pending) p++; } });
+    if (shared.ok === false) el.textContent = 'Fikk ikke kontakt med delt kart akkurat nå. Viser sist hentede markeringer (' + fmtInt(n) + ').';
+    else el.textContent = 'Delte markeringer: ' + fmtInt(n) + '. Nye strekninger du lager deles med alle.' + (p ? ' ' + p + ' venter på å bli sendt.' : '');
+  }
+  function sharedRefresh() {
+    if (!sharedOn()) return Promise.resolve();
+    return sharedFetchAll().then(function (rows) {
+      mergeRemote(rows);
+      shared.ok = true; shared.when = Date.now();
+      kvPut('shared-marks', rows);
+      render(); sharedStatus();
+    }).catch(function (e) {
+      shared.ok = false; sharedStatus();
+      if (window.console) console.log('Delte markeringer:', e.message);
     });
   }
-
-  function nvdbLoad() {
-    kvGet(NVDB_KEY).then(function (rec) {
-      if (rec && Array.isArray(rec.items)) {
-        nvdb.items = rec.items.map(buildItem);
-        nvdb.fetchedAt = rec.fetched;
-        nvdb.stats = rec.stats;
-      }
-      nvdbSummary();
-      if (nvdb.layer) nvdb.layer.redraw();
-    });
+  function sharedPost(s) {
+    var body = { id: s.id, type: s.type, year: s.year, note: s.note || '', until_text: s.until || '', coords: s.coords, token: tokens[s.id] };
+    return sbFetch('/rest/v1/marks', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(body) })
+      .then(function () { s.pending = false; save(); return true; })
+      .catch(function (e) {
+        if (e.status === 409) { s.pending = false; save(); return true; } // finnes fra før
+        if (e.status >= 400 && e.status < 500) {
+          // Avvist av databasen. Ikke prøv igjen; behold strekningen bare på denne enheten.
+          s.remote = false; s.pending = false; delete tokens[s.id]; saveTokens(); save(); render();
+          toast('Delt kart avviste strekningen. Den er bare lagret på denne enheten.');
+          if (window.console) console.log('Delt kart avviste:', e.message);
+        }
+        return false;
+      });
   }
-
-  $('nvStart').addEventListener('click', startNvdb);
-  $('nvCancel').addEventListener('click', function () { nvdb.cancel = true; });
-  $('nvClear').addEventListener('click', function () {
-    kvDelete(NVDB_KEY).then(function () {
-      nvdb.items = []; nvdb.fetchedAt = null; nvdb.stats = null;
-      nvdb.layer.redraw(); nvdbSummary();
-      toast('Vegvesenets data er slettet fra enheten.');
-    });
-  });
-  $('fNvdb').addEventListener('change', function () { nvdb.layer.redraw(); });
+  function syncPending() {
+    if (!sharedOn()) return Promise.resolve();
+    var todo = segments.filter(function (s) { return s.remote && s.pending; });
+    return todo.reduce(function (p, s) { return p.then(function () { return sharedPost(s); }); }, Promise.resolve())
+      .then(function () { sharedStatus(); });
+  }
+  function sharedUpdate(s, type, year, note, until) {
+    return sbFetch('/rest/v1/rpc/update_mark', {
+      method: 'POST',
+      body: JSON.stringify({ p_id: s.id, p_token: tokens[s.id], p_type: type, p_year: year, p_note: note, p_until: until })
+    }).then(function (r) { return r.json(); }).then(function (ok) { return ok === true; }).catch(function () { return false; });
+  }
+  function sharedDelete(s) {
+    return sbFetch('/rest/v1/rpc/delete_mark', {
+      method: 'POST', body: JSON.stringify({ p_id: s.id, p_token: tokens[s.id] })
+    }).then(function (r) { return r.json(); }).then(function (ok) { return ok === true; }).catch(function () { return false; });
+  }
+  function sharedBootstrap() {
+    sharedStatus();
+    if (!sharedOn()) return;
+    kvGet('shared-marks').then(function (rows) {
+      if (Array.isArray(rows)) { mergeRemote(rows); render(); sharedStatus(); }
+      return sharedRefresh();
+    }).then(syncPending);
+  }
 
   /* ================= Hendelser ================= */
   $('startDraw').addEventListener('click', startDraw);
@@ -2522,7 +2483,13 @@ svg.leaflet-image-layer.leaflet-interactive path {
     dbClear(currentLayer.id).then(function () { refreshStored(); toast('Lagret kart er slettet for ' + currentLayer.label + '.'); });
   });
 
-  window.addEventListener('online', function () { toast('Du er tilbake på nett.'); });
+  window.addEventListener('online', function () {
+    toast('Du er tilbake på nett.');
+    syncPending().then(sharedRefresh);
+  });
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden && sharedOn() && Date.now() - shared.when > 5 * 60 * 1000) sharedRefresh();
+  });
   window.addEventListener('offline', function () { toast('Du er uten nett. Lagrede kartfliser brukes.'); });
 
   $('togglePanel').addEventListener('click', function () {
@@ -2559,6 +2526,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   unk.appendChild(document.createTextNode('Ukjent alder'));
   legend.appendChild(unk);
 
+  loadTokens();
   load();
   updateAgeLabel();
   fillLevels();
@@ -2576,6 +2544,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   render();
   refreshStored();
   nvdbLoad();
+  sharedBootstrap();
 
   // Gjør selve appen tilgjengelig uten nett når den ligger på en nettadresse (krever sw.js ved siden av).
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
